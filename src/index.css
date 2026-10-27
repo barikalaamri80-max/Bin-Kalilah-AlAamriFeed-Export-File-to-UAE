@@ -113,6 +113,21 @@
   -webkit-text-fill-color: transparent;
 }
 
+@keyframes fadeInDoc {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.evidence-doc-fade-in {
+  animation: fadeInDoc 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
 @media print {
   .no-print {
     display: none !important;
@@ -122,3 +137,4 @@
     color: #23113d !important;
   }
 }
+

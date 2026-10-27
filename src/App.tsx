@@ -51,6 +51,12 @@ import {
   ELEVENLABS_AUDIO_URLS,
   SECTION3_DIRECT_AUDIO_URL,
   EXECUTIVE_APPEAL_AUDIO_URL,
+  CLARIFICATION_QUESTIONS_AUDIO_URL,
+  CLARIFICATION_QUESTIONS_FALLBACK_URL,
+  APPROVED_AUDIO_RECORDINGS,
+  AUDIO_SKIP_INTERVALS,
+  CLARIFICATION_QUESTIONS_GROUPS,
+  ALL_CLARIFICATION_SENTENCES,
   EXECUTIVE_APPEAL_PILLARS,
   EXECUTIVE_APPEAL_INTRO_SENTENCE,
   ALL_EXECUTIVE_APPEAL_SENTENCES,
@@ -247,12 +253,24 @@ export default function App() {
   const mainAudioRef = useRef<HTMLAudioElement | null>(null);
   const section3AudioRef = useRef<HTMLAudioElement | null>(null);
   const executiveAppealAudioRef = useRef<HTMLAudioElement | null>(null);
+  const clarificationAudioRef = useRef<HTMLAudioElement | null>(null);
   const advisorAudioRef = useRef<HTMLAudioElement | null>(null);
   const segmentEndRef = useRef<number | null>(null);
   const execAppealEndRef = useRef<number | null>(null);
+  const clarificationEndRef = useRef<number | null>(null);
   const chainChaptersRef = useRef<boolean>(false);
   const lastAnnouncedSectionRef = useRef<string | null>(null);
   const lastExecSentenceIdRef = useRef<string | null>(null);
+  const lastClarificationSentenceIdRef = useRef<string | null>(null);
+
+  // Approved Recording Switcher state (Dropdown + Tabs for the 3 deduplicated recordings)
+  const [selectedApprovedRecordingId, setSelectedApprovedRecordingId] = useState<string>('clarification-questions');
+
+  // Clarification Questions Recording (07:26) state
+  const [clarificationAudioSrc, setClarificationAudioSrc] = useState<string>(CLARIFICATION_QUESTIONS_AUDIO_URL);
+  const [isClarificationPlaying, setIsClarificationPlaying] = useState<boolean>(false);
+  const [clarificationTime, setClarificationTime] = useState<number>(0);
+  const [clarificationDuration, setClarificationDuration] = useState<number>(418.0);
 
   // Executive Summary & Final Appeal Recording (03:46) state + Companion Visual Frame sizing state
   const [isExecAppealPlaying, setIsExecAppealPlaying] = useState<boolean>(false);
@@ -277,9 +295,16 @@ export default function App() {
     if (
       Array.isArray(savedVids) &&
       savedVids.length === FIELD_VIDEOS.length &&
-      savedVids[0]?.id === 'conv-evidence-1'
+      savedVids[0]?.id === 'conv-evidence-1' &&
+      savedVids[0]?.url === FIELD_VIDEOS[0].url
     ) {
-      return savedVids;
+      return savedVids.map((v, idx) => {
+        const canonical = FIELD_VIDEOS[idx];
+        if (canonical && v.id === canonical.id && !v.url.startsWith('blob:') && !v.url.startsWith('/user_uploads/')) {
+          return canonical;
+        }
+        return v;
+      });
     }
     return FIELD_VIDEOS;
   });
@@ -362,10 +387,14 @@ export default function App() {
           saved.fieldVideos[0]?.id === 'conv-evidence-1'
         ) {
           const hydratedVideos = await Promise.all(
-            saved.fieldVideos.map(async (v) => {
+            saved.fieldVideos.map(async (v, idx) => {
               if (v.url.startsWith('blob:')) {
                 const restored = await loadBlobUrlFromIndexedDB(`media_vid_${v.id}`);
                 if (restored) return { ...v, url: restored };
+              }
+              const canonical = FIELD_VIDEOS[idx];
+              if (canonical && v.id === canonical.id && !v.url.startsWith('blob:') && !v.url.startsWith('/user_uploads/')) {
+                return canonical;
               }
               return v;
             })
@@ -414,6 +443,7 @@ export default function App() {
 
     const sectionIds = [
       'hero-section',
+      'section-clarification-questions',
       'paradigm-section',
       'section-executive-appeal',
       'section-01',
@@ -481,7 +511,7 @@ export default function App() {
           setActiveModalVideo(null);
           setIsGradualAutoScroll(true);
           window.setTimeout(() => {
-            playElevenLabsSegment('hero', 0, null, 0, true);
+            playClarificationQuestions(0, null, 'clarification-full', true);
           }, 250);
           return 0;
         }
@@ -494,9 +524,19 @@ export default function App() {
   const effectiveSyncTime =
     isFullPresentationPlaying || activeAudioId ? currentTime : silentTeleprompterTime;
 
+  const activeClarificationSentence =
+    ALL_CLARIFICATION_SENTENCES.find(
+      (s) => s.text.trim().length > 0 && clarificationTime >= s.start && clarificationTime < s.end
+    ) || ALL_CLARIFICATION_SENTENCES[0];
+
+  const activeClarificationGroup =
+    CLARIFICATION_QUESTIONS_GROUPS.find(
+      (g) => clarificationTime >= g.start && clarificationTime < g.end
+    ) || CLARIFICATION_QUESTIONS_GROUPS[0];
+
   const activeExecSentence =
     ALL_EXECUTIVE_APPEAL_SENTENCES.find(
-      (s) => execAppealTime >= s.start && execAppealTime < s.end
+      (s) => s.text.trim().length > 0 && execAppealTime >= s.start && execAppealTime < s.end
     ) || EXECUTIVE_APPEAL_INTRO_SENTENCE;
 
   const activeExecPillar =
@@ -509,7 +549,16 @@ export default function App() {
       (seg) => effectiveSyncTime >= seg.start && effectiveSyncTime <= seg.end
     ) || SYNCED_SCRIPT_SEGMENTS[0];
 
-  const activeScriptSegment = isExecAppealPlaying
+  const activeScriptSegment = isClarificationPlaying
+    ? {
+        id: activeClarificationSentence.id,
+        sectionId: 'section-clarification-questions',
+        start: activeClarificationSentence.start,
+        end: activeClarificationSentence.end,
+        title: activeClarificationGroup.title,
+        text: activeClarificationSentence.text,
+      }
+    : isExecAppealPlaying
     ? {
         id: activeExecSentence.id,
         sectionId: 'section-executive-appeal',
@@ -604,14 +653,43 @@ export default function App() {
     }
   };
 
+  const fadeTimerRef = useRef<number | null>(null);
+
+  const smoothFadeInAudio = (audioEl: HTMLAudioElement) => {
+    if (fadeTimerRef.current) {
+      window.clearInterval(fadeTimerRef.current);
+      fadeTimerRef.current = null;
+    }
+    try {
+      audioEl.volume = 0.2;
+      let vol = 0.2;
+      fadeTimerRef.current = window.setInterval(() => {
+        vol = Math.min(1, vol + 0.16);
+        audioEl.volume = vol;
+        if (vol >= 1 && fadeTimerRef.current) {
+          window.clearInterval(fadeTimerRef.current);
+          fadeTimerRef.current = null;
+        }
+      }, 55);
+    } catch {
+      // Ignore if volume is read-only on mobile OS
+    }
+  };
+
   const stopAllAudio = () => {
+    if (fadeTimerRef.current) {
+      window.clearInterval(fadeTimerRef.current);
+      fadeTimerRef.current = null;
+    }
     chainChaptersRef.current = false;
     segmentEndRef.current = null;
     execAppealEndRef.current = null;
+    clarificationEndRef.current = null;
     isTransitionCuePlayingRef.current = false;
     lastAnnouncedSectionRef.current = null;
     setIsFullPresentationPlaying(false);
     setIsExecAppealPlaying(false);
+    setIsClarificationPlaying(false);
     setActiveAudioId(null);
     setActiveChapterIndex(null);
     setIsLoadingAudio(null);
@@ -626,11 +704,161 @@ export default function App() {
     if (executiveAppealAudioRef.current) {
       executiveAppealAudioRef.current.pause();
     }
+    if (clarificationAudioRef.current) {
+      clarificationAudioRef.current.pause();
+    }
     if (advisorAudioRef.current) {
       advisorAudioRef.current.pause();
     }
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
+    }
+  };
+
+  // Play the dedicated 12 Clarification Questions Recording (07:26) right after the Title and Introduction
+  const playClarificationQuestions = async (
+    startSec = 0,
+    endSec: number | null = null,
+    targetId = 'clarification-full',
+    scrollToSection = false
+  ) => {
+    const clarAudio = clarificationAudioRef.current;
+    if (!clarAudio) return;
+
+    if (
+      isClarificationPlaying &&
+      activeAudioId === targetId &&
+      endSec === clarificationEndRef.current
+    ) {
+      stopAllAudio();
+      return;
+    }
+
+    pauseAllEvidenceVideos();
+    if (mainAudioRef.current && !mainAudioRef.current.paused) {
+      mainAudioRef.current.pause();
+    }
+    if (section3AudioRef.current && !section3AudioRef.current.paused) {
+      section3AudioRef.current.pause();
+    }
+    if (executiveAppealAudioRef.current && !executiveAppealAudioRef.current.paused) {
+      executiveAppealAudioRef.current.pause();
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    chainChaptersRef.current = false;
+    segmentEndRef.current = null;
+    execAppealEndRef.current = null;
+    isTransitionCuePlayingRef.current = false;
+    setIsFullPresentationPlaying(false);
+    setIsExecAppealPlaying(false);
+    setActiveChapterIndex(null);
+
+    clarificationEndRef.current = endSec;
+    setSelectedApprovedRecordingId('clarification-questions');
+    setActiveAudioId(targetId);
+    setIsClarificationPlaying(true);
+    setIsGradualAutoScroll(true);
+
+    if (scrollToSection) {
+      const secEl = document.getElementById('section-clarification-questions');
+      if (secEl) {
+        secEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+    try {
+      clarAudio.currentTime = startSec;
+      setClarificationTime(startSec);
+      smoothFadeInAudio(clarAudio);
+      await clarAudio.play();
+    } catch {
+      if (clarificationAudioSrc !== CLARIFICATION_QUESTIONS_FALLBACK_URL) {
+        setClarificationAudioSrc(CLARIFICATION_QUESTIONS_FALLBACK_URL);
+      } else {
+        showToast(
+          'warning',
+          'تنبيه المشغل الصوتي',
+          'يرجى النقر مرة أخرى لتفعيل تشغيل التسجيل الصوتي في المتصفح.'
+        );
+      }
+    }
+  };
+
+  const handleClarificationTimeUpdate = () => {
+    const clarAudio = clarificationAudioRef.current;
+    if (!clarAudio || isTransitionCuePlayingRef.current) return;
+    let t = clarAudio.currentTime;
+
+    // Programmatic Auto-Skip for duplicate takes (06:58–07:25) & filler intervals
+    const skipList = AUDIO_SKIP_INTERVALS['clarification-questions'] || [];
+    for (const interval of skipList) {
+      if (t >= interval.start && t < interval.end - 0.05) {
+        if (interval.end >= 418.0) {
+          // End of the official 12 questions memo (2. مذكرة الأسئلة الاستيضاحية) -> smoothly chain to 3. الوقائع والتدخل الأجنبي (section3)
+          clarAudio.pause();
+          clarificationEndRef.current = null;
+          setIsClarificationPlaying(false);
+          setActiveAudioId(null);
+          triggerSmartSlideTransitionAlert('section4', () => {
+            const sec3Range = SECTION_TIMESTAMPS.section3;
+            if (sec3Range) {
+              playElevenLabsSegment('section3', sec3Range.start, sec3Range.end, null, false);
+            }
+          });
+          return;
+        }
+        clarAudio.currentTime = interval.end;
+        t = interval.end;
+        break;
+      }
+    }
+
+    setClarificationTime(t);
+
+    if (clarificationEndRef.current !== null && t >= clarificationEndRef.current - 0.08) {
+      const currentGroup = CLARIFICATION_QUESTIONS_GROUPS.find(
+        (g) => Math.abs(g.end - (clarificationEndRef.current || 0)) < 1.5
+      );
+      const currentIdx = currentGroup
+        ? CLARIFICATION_QUESTIONS_GROUPS.findIndex((g) => g.id === currentGroup.id)
+        : -1;
+      const nextGroup =
+        currentIdx !== -1 && currentIdx + 1 < CLARIFICATION_QUESTIONS_GROUPS.length
+          ? CLARIFICATION_QUESTIONS_GROUPS[currentIdx + 1]
+          : null;
+
+      clarAudio.pause();
+      clarificationEndRef.current = null;
+
+      if (nextGroup) {
+        window.setTimeout(() => {
+          playClarificationQuestions(nextGroup.start, nextGroup.end, nextGroup.id, false);
+        }, 350);
+      } else {
+        setIsClarificationPlaying(false);
+        setActiveAudioId(null);
+      }
+      return;
+    }
+
+    // Downward synchronized scroll with the active spoken question/sentence
+    const currentSentence = ALL_CLARIFICATION_SENTENCES.find(
+      (s) => s.text.trim().length > 0 && t >= s.start && t < s.end
+    );
+    if (
+      currentSentence &&
+      lastClarificationSentenceIdRef.current !== currentSentence.id
+    ) {
+      lastClarificationSentenceIdRef.current = currentSentence.id;
+      if (isGradualAutoScroll) {
+        const sentEl = document.getElementById(`clar-sentence-${currentSentence.id}`);
+        if (sentEl) {
+          sentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
     }
   };
 
@@ -658,16 +886,22 @@ export default function App() {
     if (section3AudioRef.current && !section3AudioRef.current.paused) {
       section3AudioRef.current.pause();
     }
+    if (clarificationAudioRef.current && !clarificationAudioRef.current.paused) {
+      clarificationAudioRef.current.pause();
+    }
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
     chainChaptersRef.current = false;
     segmentEndRef.current = null;
+    clarificationEndRef.current = null;
     isTransitionCuePlayingRef.current = false;
     setIsFullPresentationPlaying(false);
+    setIsClarificationPlaying(false);
     setActiveChapterIndex(null);
 
     execAppealEndRef.current = endSec;
+    setSelectedApprovedRecordingId('executive-appeal');
     setActiveAudioId(targetId);
     setIsExecAppealPlaying(true);
     setIsGradualAutoScroll(true);
@@ -690,6 +924,7 @@ export default function App() {
     try {
       execAudio.currentTime = startSec;
       setExecAppealTime(startSec);
+      smoothFadeInAudio(execAudio);
       await execAudio.play();
     } catch {
       showToast(
@@ -705,7 +940,18 @@ export default function App() {
   const handleExecAppealTimeUpdate = () => {
     const execAudio = executiveAppealAudioRef.current;
     if (!execAudio || isTransitionCuePlayingRef.current) return;
-    const t = execAudio.currentTime;
+    let t = execAudio.currentTime;
+
+    // Programmatic Auto-Skip for overlapping/redacted or filler intervals in Executive Appeal
+    const skipList = AUDIO_SKIP_INTERVALS['executive-appeal'] || [];
+    for (const interval of skipList) {
+      if (t >= interval.start && t < interval.end - 0.05) {
+        execAudio.currentTime = interval.end;
+        t = interval.end;
+        break;
+      }
+    }
+
     setExecAppealTime(t);
 
     // Check if playing a specific pillar segment and reached its end timestamp:
@@ -736,20 +982,13 @@ export default function App() {
       } else {
         setIsExecAppealPlaying(false);
         setActiveAudioId(null);
-        // After the 4th pillar finishes, automatically chain to Section 01 of the main dossier narration
-        triggerSmartSlideTransitionAlert('hero', () => {
-          const sec1Range = SECTION_TIMESTAMPS.section1;
-          if (sec1Range) {
-            playElevenLabsSegment('section1', sec1Range.start, null, 1, true);
-          }
-        });
       }
       return;
     }
 
     // Smoothly auto-scroll to keep the active spoken sentence in view when auto-scroll is active
     const currentSentence = ALL_EXECUTIVE_APPEAL_SENTENCES.find(
-      (s) => t >= s.start && t < s.end
+      (s) => s.text.trim().length > 0 && t >= s.start && t < s.end
     );
     if (currentSentence && lastExecSentenceIdRef.current !== currentSentence.id) {
       lastExecSentenceIdRef.current = currentSentence.id;
@@ -788,16 +1027,16 @@ export default function App() {
     const nextSectionDomId =
       sectionMeta?.nextSectionKey === 'section1'
         ? 'section-01'
-        : sectionMeta?.nextSectionKey === 'section2'
-        ? 'section-02'
+        : sectionMeta?.nextSectionKey === 'section4'
+        ? 'section-clarification-questions'
         : sectionMeta?.nextSectionKey === 'section3'
         ? 'section-03'
-        : sectionMeta?.nextSectionKey === 'section4'
-        ? 'section-04'
+        : sectionMeta?.nextSectionKey === 'section2'
+        ? 'section-02'
         : sectionMeta?.nextSectionKey === 'section5'
         ? 'section-05'
         : sectionMeta?.nextSectionKey === 'section6'
-        ? 'section-06'
+        ? 'section-executive-appeal'
         : completedKey === 'section6'
         ? 'section-executive-appeal'
         : null;
@@ -927,6 +1166,10 @@ export default function App() {
       executiveAppealAudioRef.current.pause();
       setIsExecAppealPlaying(false);
     }
+    if (clarificationAudioRef.current) {
+      clarificationAudioRef.current.pause();
+      setIsClarificationPlaying(false);
+    }
 
     const audio = mainAudioRef.current;
     if (!audio) return;
@@ -934,6 +1177,7 @@ export default function App() {
     chainChaptersRef.current = chainAll;
     segmentEndRef.current = endSec;
     lastAnnouncedSectionRef.current = id;
+    setSelectedApprovedRecordingId('main-dossier');
     setActiveAudioId(id);
     setActiveChapterIndex(chapterIdx);
     setIsFullPresentationPlaying(chainAll);
@@ -949,11 +1193,11 @@ export default function App() {
         : id === 'section3'
         ? 'section-03'
         : id === 'section4'
-        ? 'section-04'
+        ? 'section-clarification-questions'
         : id === 'section5'
         ? 'section-05'
         : id === 'section6'
-        ? 'section-06'
+        ? 'section-executive-appeal'
         : null;
     if (domSecId) {
       const matchedBgIdx = BACKGROUND_SCENE_VIDEOS.findIndex((s) => s.sectionKey === domSecId);
@@ -966,6 +1210,7 @@ export default function App() {
     try {
       audio.currentTime = startSec;
       setCurrentTime(startSec);
+      smoothFadeInAudio(audio);
       await audio.play();
     } catch {
       if (audioUrlIndex < ELEVENLABS_AUDIO_URLS.length - 1) {
@@ -997,12 +1242,23 @@ export default function App() {
   const handleAudioTimeUpdate = () => {
     const audio = mainAudioRef.current;
     if (!audio || isTransitionCuePlayingRef.current) return;
-    const t = audio.currentTime;
+    let t = audio.currentTime;
+
+    // Programmatic Auto-Skip for overlapping sentences or filler hesitations in Main Dossier
+    const skipList = AUDIO_SKIP_INTERVALS['main-dossier'] || [];
+    for (const interval of skipList) {
+      if (t >= interval.start && t < interval.end - 0.05) {
+        audio.currentTime = interval.end;
+        t = interval.end;
+        break;
+      }
+    }
+
     setCurrentTime(t);
 
     // When a section/chapter playback reaches its end timestamp:
     // Pause main audio immediately, play the Smart Audio Transition Alert with zero overlap,
-    // and then AUTOMATICALLY chain to the next section in order!
+    // and then AUTOMATICALLY chain to the next section in the 1 -> 2 -> 3 -> 4 -> 5 -> 6 order!
     if (
       !chainChaptersRef.current &&
       segmentEndRef.current !== null &&
@@ -1017,11 +1273,13 @@ export default function App() {
 
       const nextSecKey = SECTION_TIMESTAMPS[finishedId]?.nextSectionKey;
       triggerSmartSlideTransitionAlert(finishedId, () => {
-        if (nextSecKey && SECTION_TIMESTAMPS[nextSecKey]) {
+        if (nextSecKey === 'section4') {
+          playClarificationQuestions(0, null, 'clarification-full', true);
+        } else if (nextSecKey === 'section6') {
+          playExecutiveAppeal(0, null, 'exec-appeal-full', true);
+        } else if (nextSecKey && SECTION_TIMESTAMPS[nextSecKey]) {
           const nextRange = SECTION_TIMESTAMPS[nextSecKey];
           playElevenLabsSegment(nextSecKey, nextRange.start, nextRange.end, null, false);
-        } else if (finishedId === 'section6') {
-          playExecutiveAppeal(0, null, 'exec-appeal-full', true);
         }
       });
       return;
@@ -1038,6 +1296,7 @@ export default function App() {
     let currentSecKey = activeAudioId || 'hero';
     if (chainChaptersRef.current && viewMode === 'royal') {
       if (t < 36.8) currentSecKey = 'hero';
+      else if (t < 92.5) currentSecKey = 'section5';
       else if (t < 143.5) currentSecKey = 'section1';
       else if (t < 292.8) currentSecKey = 'section3';
       else if (t < 408.5) currentSecKey = 'section2';
@@ -1186,13 +1445,13 @@ export default function App() {
     }
   };
 
-  // Start the unified studio-mastered session from 00:00 continuously
+  // Start the sequential 6-section presentation (1. المقدمة -> 2. الأسئلة 06:58 -> 3. الوقائع -> 4. الفخ المستندي -> 5. التأصيل -> 6. الخلاصة 03:46)
   const startFullInteractivePresentation = () => {
-    if (isFullPresentationPlaying) {
+    if (isFullPresentationPlaying || activeAudioId === 'hero') {
       stopAllAudio();
       return;
     }
-    playElevenLabsSegment('hero', 0, null, 0, true);
+    playElevenLabsSegment('hero', 0, SECTION_TIMESTAMPS.hero.end, 0, false);
   };
 
   const scrollToSections = () => {
@@ -1946,17 +2205,20 @@ export default function App() {
       setFieldVideos((prev) =>
         prev.map((vid, idx) => {
           if (vid.id !== targetId) return vid;
+          const isConvCard = vid.id.startsWith('conv-evidence-');
           const keepAudio =
             picked.mediaType !== 'image' &&
-            (studioPickerTarget.type === 'opening-video' || idx === 0 || Boolean(vid.hasAudio));
+            (studioPickerTarget.type === 'opening-video' || idx === 0 || isConvCard || Boolean(vid.hasAudio));
           const updatedVid: FieldVideoItem = {
             ...vid,
             url: picked.url,
+            posterUrl: picked.mediaType === 'image' ? picked.url : undefined,
             mediaType: picked.mediaType,
-            title:
-              idx === 0
-                ? `العرض التقديمي الافتتاحي المعتمد: ${picked.title}`
-                : picked.title,
+            title: isConvCard
+              ? `دلائل المحادثات (${idx + 1}): ${picked.title}`
+              : idx === 0
+              ? `العرض التقديمي الافتتاحي المعتمد: ${picked.title}`
+              : picked.title,
             subtitle: picked.subtitle,
             durationLabel: picked.durationLabel,
             hasAudio: keepAudio,
@@ -2065,28 +2327,37 @@ export default function App() {
     setFieldVideos((prev) =>
       prev.map((vid, idx) => {
         if (vid.id !== targetId) return vid;
+        const isConvCard = vid.id.startsWith('conv-evidence-');
         const keepAudio =
-          !isImage && (forceOpeningAudio || idx === 0 || Boolean(vid.hasAudio));
+          !isImage && (forceOpeningAudio || idx === 0 || isConvCard || Boolean(vid.hasAudio));
         const updatedVid: FieldVideoItem = {
           ...vid,
           url: tempBlobUrl,
+          posterUrl: isImage ? tempBlobUrl : undefined,
           mediaType: detectedMediaType,
-          title:
-            idx === 0
-              ? `العرض التقديمي الافتتاحي المعتمد: ${cleanName}`
-              : `توثيق ميداني من الاستوديو: ${cleanName}`,
+          title: isConvCard
+            ? `دلائل المحادثات (${idx + 1}): ${cleanName}`
+            : idx === 0
+            ? `العرض التقديمي الافتتاحي المعتمد: ${cleanName}`
+            : `توثيق ميداني من الاستوديو: ${cleanName}`,
           subtitle: isImage
-            ? 'صورة توثيقية ميدانية من الاستوديو — محفوظة بشكل دائم'
+            ? 'صورة توثيقية ميدانية من الاستوديو — محفوظة مع الحفاظ على الدليل الأصلي'
+            : isConvCard
+            ? `دلائل المحادثات الموثقة بالصوت والصورة — دليل رسمي رقم (${idx + 1}) محدث من الاستوديو`
             : keepAudio
             ? 'فيديو العرض التقديمي الافتتاحي (بالصوت الكامل) — محفوظ بشكل دائم من الاستوديو'
             : 'فيديو ميداني صامت (بدون صوت) — محفوظ بشكل دائم من الاستوديو',
-          badge: isImage
+          badge: isConvCard
+            ? vid.badge || `دلائل المحادثات · الدليل ${idx + 1}`
+            : isImage
             ? 'صورة ميدانية معتمدة'
             : keepAudio
             ? 'العرض الافتتاحي (بالصوت الكامل)'
             : 'فيديو ميداني (صامت بدون صوت)',
           durationLabel: isImage
-            ? 'صورة ميدانية'
+            ? 'صورة توثيقية'
+            : isConvCard
+            ? 'بالصوت الواضح'
             : keepAudio
             ? 'عرض افتتاحي · بصوت'
             : 'ميداني · صامت',
@@ -2488,57 +2759,16 @@ export default function App() {
     recognition.start();
   };
 
-  // Gradual word-by-word voice-to-text synchronizer so visible text illuminates word-by-word with the spoken audio
+  // Render clean, calm ministerial text without moving word-by-word highlight boxes
   const renderGradualSyncedWords = (
     text: string,
-    progressRatio: number,
-    isActive: boolean,
-    isPassed: boolean,
-    theme: 'dark' | 'goldCard' | 'light' = 'dark'
+    _arg1?: number,
+    _arg2?: number | boolean,
+    _arg3?: number | boolean,
+    _arg4?: boolean | string,
+    _arg5?: boolean
   ) => {
-    const words = text.trim().split(/\s+/);
-    if (!isActive) {
-      return <span>{text}</span>;
-    }
-    const clamped = Math.max(0, Math.min(1, progressRatio));
-    const currentWordIdx = Math.min(words.length - 1, Math.floor(clamped * words.length));
-
-    return (
-      <span>
-        {words.map((word, wIdx) => {
-          const isCurrentWord = wIdx === currentWordIdx;
-          const isSpokenWord = wIdx < currentWordIdx || isPassed;
-
-          let wordClass = '';
-          if (theme === 'goldCard') {
-            wordClass = isCurrentWord
-              ? 'bg-[#2b124c] text-[#fff2c6] px-1.5 py-0.5 rounded-md font-black shadow-sm underline decoration-[#e7cb82] decoration-2 underline-offset-4 transition-all duration-150'
-              : isSpokenWord
-              ? 'text-[#1e0b36] font-black transition-colors duration-150'
-              : 'text-[#1e0b36]/60 font-semibold transition-colors duration-150';
-          } else if (theme === 'light') {
-            wordClass = isCurrentWord
-              ? 'bg-[#2b124c] text-[#fff2c6] px-1.5 py-0.5 rounded-md font-black shadow-sm transition-all duration-150'
-              : isSpokenWord
-              ? 'text-[#2b124c] font-black transition-colors duration-150'
-              : 'text-[#4a3963]/65 font-medium transition-colors duration-150';
-          } else {
-            wordClass = isCurrentWord
-              ? 'bg-[#e7cb82] text-[#1e0b36] px-1.5 py-0.5 rounded-md font-black shadow-md transition-all duration-150'
-              : isSpokenWord
-              ? 'text-[#fff2c6] font-extrabold transition-colors duration-150'
-              : 'text-[#f7f2eb]/65 font-medium transition-colors duration-150';
-          }
-
-          return (
-            <React.Fragment key={wIdx}>
-              <span className={wordClass}>{word}</span>
-              {wIdx < words.length - 1 ? ' ' : ''}
-            </React.Fragment>
-          );
-        })}
-      </span>
-    );
+    return <span>{text}</span>;
   };
 
   const renderSectionAudioButton = (sectionKey: string, label = 'استماع للشريحة') => {
@@ -2602,7 +2832,8 @@ export default function App() {
         <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#c9a452]/35">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="gold-metallic-card text-[10px] font-black px-2.5 py-0.5 rounded-md">
-              {item.badge} ({item.timeRange})
+              {item.badge}
+              {item.timeRange ? ` (${item.timeRange})` : ''}
             </span>
             <h4 className="text-xs sm:text-sm font-black text-[#f3dfa6]">{item.heading}</h4>
           </div>
@@ -2663,7 +2894,7 @@ export default function App() {
                   <span className="inline-flex items-center gap-1.5 text-[10px] font-extrabold text-[#e7cb82]">
                     <Volume2
                       className={`w-3.5 h-3.5 ${
-                        isParaSpeaking ? 'text-[#fff2c6] animate-bounce' : 'text-[#e7cb82]'
+                        isParaSpeaking ? 'text-[#fff2c6]' : 'text-[#e7cb82]'
                       }`}
                     />
                     <span>
@@ -2674,9 +2905,11 @@ export default function App() {
                         : `الفقرة (${idx + 1}) — اضغط للاستماع المباشر`}
                     </span>
                   </span>
-                  <span className="font-mono text-[10px] font-bold text-[#f3dfa6] bg-black/35 px-2 py-0.5 rounded tabular-nums">
-                    {formatTime(pStart)} – {formatTime(pEnd)}
-                  </span>
+                  {item.timeRange && sectionKey !== 'section5' && sectionKey !== 'section6' && (
+                    <span className="font-mono text-[10px] font-bold text-[#f3dfa6] bg-black/35 px-2 py-0.5 rounded tabular-nums">
+                      {formatTime(pStart)} – {formatTime(pEnd)}
+                    </span>
+                  )}
                 </div>
 
                 <p className="text-xs sm:text-sm text-[#f7f2eb] leading-[2.05] font-medium">
@@ -2800,12 +3033,12 @@ export default function App() {
       {/* FIXED FULL-SCREEN VIDEO BACKGROUND WITH ROTATING FIELD/TRUCK VIDEOS ONE AFTER ANOTHER */}
       <div className="fixed inset-0 z-0 w-screen h-screen overflow-hidden pointer-events-none no-print bg-[#140526]">
         <video
-          key={activeBackgroundVideoUrl}
           src={activeBackgroundVideoUrl}
           autoPlay
           loop={!autoCycleBgScenes}
           muted
           playsInline
+          preload="auto"
           onEnded={() => {
             if (autoCycleBgScenes && allBgVideoUrls.length > 1) {
               setBgSceneIndex((prev) => (prev + 1) % allBgVideoUrls.length);
@@ -2816,8 +3049,17 @@ export default function App() {
               setBgSceneIndex((prev) => (prev + 1) % allBgVideoUrls.length);
             }
           }}
-          className="w-full h-full object-cover opacity-90"
+          className="w-full h-full object-cover opacity-90 transition-opacity duration-700"
         />
+        {allBgVideoUrls.length > 1 && (
+          <video
+            src={allBgVideoUrls[(bgSceneIndex + 1) % allBgVideoUrls.length]}
+            muted
+            playsInline
+            preload="metadata"
+            className="hidden"
+          />
+        )}
         <div className="absolute inset-0 bg-[#140526]/30" />
       </div>
 
@@ -2844,10 +3086,6 @@ export default function App() {
               setIsFullPresentationPlaying(false);
               setActiveAudioId(null);
               setActiveChapterIndex(null);
-              // Automatically chain into the 03:46 Executive Summary & Final Appeal recording!
-              triggerSmartSlideTransitionAlert('section6', () => {
-                playExecutiveAppeal(0, null, 'exec-appeal-full', true);
-              });
             }}
             onError={() => {
               if (audioUrlIndex < ELEVENLABS_AUDIO_URLS.length - 1) {
@@ -2886,17 +3124,34 @@ export default function App() {
               setIsExecAppealPlaying(false);
               setActiveAudioId(null);
               execAppealEndRef.current = null;
-              showToast(
-                'success',
-                'اكتمل التسجيل الصوتي للخلاصة التنفيذية — الانتقال التلقائي للمحاور التفصيلية',
-                'تم الانتهاء من تلاوة الخلاصة التنفيذية (03:46)، وينتقل العرض صوتياً تلقائياً إلى المحور الأول.'
-              );
-              triggerSmartSlideTransitionAlert('hero', () => {
-                const sec1Range = SECTION_TIMESTAMPS.section1;
-                if (sec1Range) {
-                  playElevenLabsSegment('section1', sec1Range.start, null, 1, true);
+            }}
+            className="hidden"
+          />
+          <audio
+            ref={clarificationAudioRef}
+            src={clarificationAudioSrc}
+            preload="auto"
+            onTimeUpdate={handleClarificationTimeUpdate}
+            onLoadedMetadata={(e) => {
+              if (e.currentTarget.duration && Number.isFinite(e.currentTarget.duration)) {
+                setClarificationDuration(Math.min(418.0, e.currentTarget.duration));
+              }
+            }}
+            onEnded={() => {
+              setIsClarificationPlaying(false);
+              setActiveAudioId(null);
+              clarificationEndRef.current = null;
+              triggerSmartSlideTransitionAlert('section4', () => {
+                const sec3Range = SECTION_TIMESTAMPS.section3;
+                if (sec3Range) {
+                  playElevenLabsSegment('section3', sec3Range.start, sec3Range.end, null, false);
                 }
               });
+            }}
+            onError={() => {
+              if (clarificationAudioSrc !== CLARIFICATION_QUESTIONS_FALLBACK_URL) {
+                setClarificationAudioSrc(CLARIFICATION_QUESTIONS_FALLBACK_URL);
+              }
             }}
             className="hidden"
           />
@@ -3712,7 +3967,7 @@ export default function App() {
                     ref={openingHeroVideoRef}
                     key={OPENING_PRESENTATION_VIDEO.url}
                     src={OPENING_PRESENTATION_VIDEO.url}
-                    poster="/assets/aistudio/poster-conv-1.jpg"
+                    poster="/assets/aistudio/fleet1.jpg"
                     controls
                     playsInline
                     preload="metadata"
@@ -3735,30 +3990,6 @@ export default function App() {
                     style={{ transform: `scale(${heroVideoScale / 100})` }}
                     className="w-full h-full object-contain bg-black mx-auto transition-transform duration-200"
                   />
-                </div>
-
-                {/* Clear Notice for WhatsApp Conversation Inside */}
-                <div
-                  onClick={() => {
-                    stopAllAudio();
-                    setIsOpeningAutoMuted(false);
-                    setIsModalFullscreen(true);
-                    setModalFitMode('contain');
-                    setModalZoomScale(100);
-                    setActiveModalVideo(OPENING_PRESENTATION_VIDEO);
-                  }}
-                  className="mt-3 bg-[#2b124c] hover:bg-[#381960] border-2 border-[#e7cb82] rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 cursor-pointer transition-all"
-                >
-                  <div className="flex items-center gap-2 text-xs font-black text-[#fff2c6]">
-                    <Volume2 className="w-4 h-4 text-[#e7cb82] shrink-0" />
-                    <span>
-                      اضغط على الشاشة لفتح محادثة الواتساب — لترى المحادثة كاملة افتح الشاشة (تكبير كامل بالصوت الواضح)
-                    </span>
-                  </div>
-                  <span className="gold-metallic-card text-[10px] font-black px-2.5 py-1 rounded-lg flex items-center gap-1 shrink-0">
-                    <Maximize2 className="w-3 h-3" />
-                    <span>تكبير كامل</span>
-                  </span>
                 </div>
 
                 <div className="mt-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -3785,7 +4016,7 @@ export default function App() {
                       className="gold-metallic-card px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-md"
                     >
                       <Maximize2 className="w-3.5 h-3.5" />
-                      <span>فتح العرض الافتتاحي ومحادثة الواتساب بملء الشاشة الكاملة</span>
+                      <span>فتح العرض الافتتاحي الميداني بملء الشاشة الكاملة</span>
                     </button>
 
                     <button
@@ -3806,17 +4037,40 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Hero CTA & Settings Controls */}
+              {/* Hero CTA & Approved Audio Recordings Switcher (Dropdown + Buttons) */}
               <div className="mt-7 flex flex-wrap items-center justify-center gap-3 no-print">
+                <button
+                  type="button"
+                  onClick={() =>
+                    playClarificationQuestions(0, null, 'clarification-full', true)
+                  }
+                  className={`px-5 py-3 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
+                    isClarificationPlaying
+                      ? 'bg-white text-[#2b124c] ring-2 ring-[#e7cb82]'
+                      : 'gold-metallic-card hover:brightness-105'
+                  }`}
+                >
+                  {isClarificationPlaying ? (
+                    <Pause className="w-4 h-4 fill-current" />
+                  ) : (
+                    <Volume2 className="w-4 h-4" />
+                  )}
+                  <span>
+                    {isClarificationPlaying
+                      ? `مذكرة الأسئلة الاستيضاحية (${formatTime(clarificationTime)} / ${formatTime(clarificationDuration)})`
+                      : 'تشغيل مذكرة الأسئلة الاستيضاحية الـ 12 (07:26)'}
+                  </span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() =>
                     playExecutiveAppeal(0, null, 'exec-appeal-full', true)
                   }
-                  className={`px-6 py-3 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
+                  className={`px-5 py-3 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
                     isExecAppealPlaying
                       ? 'bg-white text-[#2b124c] ring-2 ring-[#e7cb82]'
-                      : 'gold-metallic-card hover:brightness-105'
+                      : 'bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#e7cb82] text-[#f3dfa6]'
                   }`}
                 >
                   {isExecAppealPlaying ? (
@@ -3826,8 +4080,8 @@ export default function App() {
                   )}
                   <span>
                     {isExecAppealPlaying
-                      ? `جاري تلاوة الخلاصة التنفيذية (${formatTime(execAppealTime)} / ${formatTime(execAppealDuration)})...`
-                      : 'تشغيل التسجيل الجديد: الخلاصة التنفيذية والنداء الختامي (03:46) مع النص الحرفي المتزامن'}
+                      ? `الخلاصة التنفيذية (${formatTime(execAppealTime)} / ${formatTime(execAppealDuration)})`
+                      : 'الخلاصة التنفيذية والنداء الختامي (03:46)'}
                   </span>
                 </button>
 
@@ -3848,478 +4102,751 @@ export default function App() {
                   <span>
                     {isFullPresentationPlaying
                       ? 'جاري الاستماع للعرض الشامل...'
-                      : 'تشغيل التسجيل الصوتي الشامل (08:36)'}
+                      : 'السرد التفصيلي الشامل للملف (08:36)'}
                   </span>
                 </button>
-
-                <button
-                  type="button"
-                  onClick={() => setSmartAudioTransition((prev) => !prev)}
-                  className={`px-4 py-3 rounded-xl border text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
-                    smartAudioTransition
-                      ? 'gold-metallic-card'
-                      : 'bg-[#2b124c] border-[#c9a452] text-[#f3dfa6]'
-                  }`}
-                >
-                  <BellRing className="w-4 h-4" />
-                  <span>
-                    تنبيه صوتي ذكي بين الشرائح: {smartAudioTransition ? 'مفعّل' : 'متوقف'}
-                  </span>
-                </button>
-
-                {showStudioControls && (
-                  <div className="inline-flex items-center gap-2 bg-[#1f0b38]/95 border border-[#c9a452] rounded-xl px-3.5 py-2.5 text-xs text-[#f3dfa6]">
-                    <span className="font-bold">درجة تعتيم الخلفية:</span>
-                    <input
-                      type="range"
-                      min={0.65}
-                      max={0.96}
-                      step={0.03}
-                      value={glassAlpha}
-                      onChange={(e) => setGlassAlpha(parseFloat(e.target.value))}
-                      className="w-24 accent-[#e7cb82] cursor-pointer"
-                    />
-                  </div>
-                )}
               </div>
-            </div>
-          </section>
 
-          {/* 3. TEMPLATE SHOWCASE SECTION: THE LOGISTICAL PARADIGM & GOLDEN ARCHITECTURE */}
-          <div className="max-w-5xl w-full mx-auto px-4 -mt-10 relative z-20 space-y-8">
-            {/* A. Fleet & KPI Paradigm Card */}
-            <section className="bg-[#faf7f0] rounded-3xl shadow-xl border-2 border-[#c9a452] overflow-hidden">
-              <div className="p-6 sm:p-8">
-                <div className="text-center mb-6">
-                  <span className="text-xs font-extrabold text-[#9c7625] tracking-wider block">
-                    المعادلة التشغيلية واللوجستية للصادرات غير النفطية (رؤية عُمان 2040)
-                  </span>
-                  <h3 className="text-xl sm:text-2xl font-black text-[#2b124c] mt-1">
-                    الواقع التشغيلي: كفاءة التصدير الوطني مقابل عوائق التعطيل الإجرائي
-                  </h3>
-                </div>
-
-                {/* Two Comparison Panels */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                  {/* Panel 1: National Exporter Readiness */}
-                  <div className="bg-[#f3ede0] border border-[#d8c59e] rounded-2xl p-5 flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center justify-between gap-2 mb-3">
-                        <span className="text-xs font-black text-[#8f6718]">
-                          مسار شركة بن كليلة العامري للتجارة والاستثمار
-                        </span>
-                        <span className="gold-metallic-card text-[10px] font-black px-2.5 py-0.5 rounded">
-                          التزام وطني 100%
-                        </span>
-                      </div>
-                      <h4 className="text-base font-extrabold text-[#2b124c]">
-                        جدول شحن نقل بري بواقع 16 تريلا لكل دورة تشغيلية (40 يوماً) مسدد التكاليف بالكامل
-                      </h4>
-                      <p className="text-xs text-[#4a3963] leading-relaxed mt-2">
-                        انطلاق مباشر من صلالة ومسقط نحو العميل النهائي{' '}
-                        <strong className="text-[#2b124c]">(مزرعة بركة الوقن)</strong> عبر منفذ خطم
-                        الشكلة، بدفع نقدي مسبق 100% دون أي مديونية أو آجال معلقة.
-                      </p>
+              {/* 1. المقدمة: البيانات المالية والتشغيلية وأسطول الشاحنات (تُذكر الأرقام المالية هنا فقط دون تكرار) */}
+              <div
+                id="section-01"
+                className="mt-8 text-right bg-[#1f0b38]/85 rounded-3xl border-2 border-[#c9a452] p-6 sm:p-8 shadow-xl"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-[#c9a452]/40">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-11 h-11 rounded-xl gold-metallic-card font-black text-base flex items-center justify-center shrink-0 tabular-nums">
+                      01
                     </div>
-
-                    {/* Interactive 6-Slot Top Media Switcher (Supports Changing to Photo OR Video, Zoom +/-, Fullscreen & Position) */}
-                    <div className="mt-4">
-                      {(() => {
-                        const currentItem = fleetPhotos[selectedFleetIdx] || FLEET_PHOTOS[0];
-                        const posY = typeof currentItem.posY === 'number' ? currentItem.posY : 50;
-                        const posX = typeof currentItem.posX === 'number' ? currentItem.posX : 50;
-                        const itemScale =
-                          typeof currentItem.scale === 'number' ? currentItem.scale : 100;
-                        const fitMode = currentItem.fitMode || 'cover';
-                        const isVideoSlot = currentItem.mediaType === 'video';
-                        const displayBadge =
-                          currentItem.badge &&
-                          (currentItem.badge.includes('16 تريلا') ||
-                            currentItem.badge.includes('أسطول'))
-                            ? 'جدول 16 تريلا'
-                            : currentItem.badge;
-
-                        return (
-                          <>
-                            <div
-                              onClick={() => {
-                                setIsModalFullscreen(true);
-                                setModalFitMode('contain');
-                                setModalZoomScale(100);
-                                setActiveModalVideo({
-                                  id: `slot-${selectedFleetIdx}`,
-                                  url: currentItem.url,
-                                  title:
-                                    currentItem.title ||
-                                    `مرفق التوثيق الميداني رقم ${selectedFleetIdx + 1}`,
-                                  subtitle: 'معاينة بملء الشاشة الكاملة — يمكنك التكبير أو التغيير',
-                                  badge: displayBadge || 'جدول 16 تريلا',
-                                  durationLabel: isVideoSlot ? 'فيديو ميداني' : 'صورة ميدانية',
-                                  hasAudio: false,
-                                  mediaType: isVideoSlot ? 'video' : 'image',
-                                });
-                              }}
-                              title="اضغط لتكبير هذه الخانة بملء الشاشة الكاملة"
-                              className={`${
-                                isShowcaseExpanded ? 'h-72 sm:h-88' : 'h-52 sm:h-60'
-                              } rounded-xl border-2 border-[#c9a452] overflow-hidden relative bg-[#1c0b33] select-none transition-all cursor-pointer group`}
-                            >
-                              {isVideoSlot ? (
-                                <video
-                                  key={currentItem.url}
-                                  src={currentItem.url}
-                                  autoPlay
-                                  muted
-                                  loop
-                                  playsInline
-                                  style={{
-                                    objectPosition: `${posX}% ${posY}%`,
-                                    transform: `scale(${itemScale / 100})`,
-                                  }}
-                                  className={`w-full h-full pointer-events-none transition-transform duration-200 ${
-                                    fitMode === 'contain' ? 'object-contain' : 'object-cover'
-                                  }`}
-                                />
-                              ) : (
-                                <img
-                                  src={currentItem.url}
-                                  alt={currentItem.title || ''}
-                                  draggable={false}
-                                  style={{
-                                    objectPosition: `${posX}% ${posY}%`,
-                                    transform: `scale(${itemScale / 100})`,
-                                  }}
-                                  className={`w-full h-full pointer-events-none transition-transform duration-200 ${
-                                    fitMode === 'contain' ? 'object-contain' : 'object-cover'
-                                  }`}
-                                />
-                              )}
-
-                              {/* Badge on bottom-right */}
-                              <span className="absolute bottom-2.5 right-2.5 royal-purple-box text-[#f3dfa6] text-[10px] font-bold px-2.5 py-1 rounded-md flex items-center gap-1 shadow-md pointer-events-none">
-                                {isVideoSlot ? (
-                                  <Film className="w-3 h-3 text-[#e7cb82]" />
-                                ) : (
-                                  <ImageIcon className="w-3 h-3 text-[#e7cb82]" />
-                                )}
-                                <span>{displayBadge}</span>
-                              </span>
-
-                              {/* Quick Fullscreen Badge on top-left */}
-                              <span className="absolute top-2.5 left-2.5 bg-black/75 text-[#e7cb82] border border-[#c9a452] text-[10px] font-black px-2.5 py-1 rounded-md flex items-center gap-1 shadow-md">
-                                <Maximize2 className="w-3 h-3" />
-                                <span>تكبير للشاشة كاملة</span>
-                              </span>
-                            </div>
-
-                            {/* Direct Studio Controls for the 6 Top Showcase Slots: Change Photo/Video, Resize +/-, Frame Height, Fit/Cover, Move Up/Down */}
-                            {showStudioControls && (
-                              <div className="mt-2.5 p-2.5 rounded-xl bg-[#1f0b38]/65 border border-[#c9a452] flex flex-wrap items-center justify-between gap-1.5 no-print">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleInstantCycleShowcaseSlot(selectedFleetIdx, false)
-                                    }
-                                    className="px-2.5 py-1 rounded-lg bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#e7cb82] text-[#f3dfa6] text-[10px] font-black flex items-center gap-1 cursor-pointer"
-                                  >
-                                    <RefreshCw className="w-3 h-3 text-[#e7cb82]" />
-                                    <span>تبديل فوري</span>
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleInstantCycleShowcaseSlot(selectedFleetIdx, true)
-                                    }
-                                    className="gold-metallic-card px-2.5 py-1 rounded-lg text-[10px] font-black flex items-center gap-1 cursor-pointer"
-                                  >
-                                    <Upload className="w-3 h-3" />
-                                    <span>تغيير (صورة أو فيديو) للخانة {selectedFleetIdx + 1}</span>
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => updateCurrentShowcasePosition(0, undefined, false, 15)}
-                                    className="px-2 py-1 rounded-lg bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                                  >
-                                    <ZoomIn className="w-3 h-3 text-[#e7cb82]" />
-                                    <span>تكبير +</span>
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => updateCurrentShowcasePosition(0, undefined, false, -15)}
-                                    className="px-2 py-1 rounded-lg bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                                  >
-                                    <ZoomOut className="w-3 h-3 text-[#e7cb82]" />
-                                    <span>تصغير -</span>
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => setIsShowcaseExpanded((p) => !p)}
-                                    className="px-2 py-1 rounded-lg bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold cursor-pointer"
-                                  >
-                                    {isShowcaseExpanded ? 'تصغير المستطيل' : 'توسيع المستطيل'}
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => updateCurrentShowcasePosition(0, undefined, true, 0)}
-                                    className="px-2 py-1 rounded-lg bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold cursor-pointer"
-                                  >
-                                    {fitMode === 'contain' ? 'ملء المستطيل' : 'احتواء كامل'}
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => updateCurrentShowcasePosition(-12)}
-                                    className="px-2 py-1 rounded-lg bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                                  >
-                                    <ArrowUp className="w-3 h-3 text-[#e7cb82]" />
-                                    <span>فوق</span>
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => updateCurrentShowcasePosition(12)}
-                                    className="px-2 py-1 rounded-lg bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                                  >
-                                    <ArrowDown className="w-3 h-3 text-[#e7cb82]" />
-                                    <span>تحت</span>
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* 6 Slot Switcher Buttons */}
-                            <div className="mt-2.5 flex items-center justify-between gap-1.5 flex-wrap no-print">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                {fleetPhotos.map((item, i) => {
-                                  const isVid = item.mediaType === 'video';
-                                  return (
-                                    <button
-                                      key={`${item.url}-${i}`}
-                                      type="button"
-                                      onClick={() => setSelectedFleetIdx(i)}
-                                      className={`text-[10px] font-bold px-2.5 py-1 rounded-md border transition-colors cursor-pointer flex items-center gap-1 ${
-                                        selectedFleetIdx === i
-                                          ? 'bg-[#2b124c] text-[#e7cb82] border-[#c9a452]'
-                                          : 'bg-white/90 text-[#2b124c] border-[#d8c59e] hover:border-[#2b124c]'
-                                      }`}
-                                    >
-                                      {isVid ? (
-                                        <Film className="w-3 h-3 text-[#c9a452]" />
-                                      ) : (
-                                        <ImageIcon className="w-3 h-3 opacity-75" />
-                                      )}
-                                      <span>
-                                        {isVid ? `فيديو ${i + 1}` : `صورة/فيديو ${i + 1}`}
-                                      </span>
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          </>
-                        );
-                      })()}
+                    <div>
+                      <span className="text-[#e7cb82] text-xs font-extrabold block">
+                        1. المقدمة — الوقائع التعاقدية والتزام المشتري في مسار رؤية عُمان 2040
+                      </span>
+                      <h3 className="text-[#fff2c6] text-lg sm:text-xl font-black mt-0.5">
+                        المقدمة: من صلالة إلى تأسيس خط التصدير الوطني غير النفطي
+                      </h3>
                     </div>
                   </div>
-
-                  {/* Panel 2: Procedural & Documentary Obstacles */}
-                  <div className="bg-[#f3ede0] border border-[#d8c59e] rounded-2xl p-5 flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center justify-between gap-2 mb-3">
-                        <span className="text-xs font-black text-[#e7cb82]">
-                          عوائق المسار الإجرائي والمستندي بالمصنع
-                        </span>
-                        <span className="bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold px-2.5 py-0.5 rounded">
-                          5 أشهر و18 يوماً من التعطيل
-                        </span>
-                      </div>
-                      <h4 className="text-base font-extrabold text-[#2b124c]">
-                        تناقض مستندي (COA) وتدخل الوسيط الخارجي (نوفل)
-                      </h4>
-                      <p className="text-xs text-[#4a3963] leading-relaxed mt-2">
-                        إصدار شهادة تحليل مخبري (0% مضادات كوكسيديا) تناقض البطاقة المطبوعة على
-                        الكيس، مما أغلق الطلب آلياً في نظام (MOCCAE)، بالتزامن مع حجب الأوراق البيطرية
-                        لاستنفاد مخزون{' '}
-                        <strong className="text-[#2b124c]">مزرعة بركة الوقن (160 ألف طير)</strong>{' '}
-                        ودفع مسار التصدير قسراً نحو الوسيط{' '}
-                        <strong className="text-[#2b124c]">(نوفل)</strong>.
-                      </p>
-                    </div>
-
-                    <div className="mt-4 space-y-2.5">
-                      <div className="p-3 rounded-xl bg-[#fffdf9] border-r-4 border-[#2b124c] shadow-2xs">
-                        <span className="text-[11px] font-black text-[#2b124c] block">
-                          1. حجب ملحقات المبيع الإلزامية للتصدير
-                        </span>
-                        <p className="text-[11px] text-[#4a3963] mt-0.5">
-                          رفض تصحيح البطاقة التعريفية بحجة: «هذا يحتاج طباعة من جديد ومكلف!».
-                        </p>
-                      </div>
-                      <div className="p-3 rounded-xl bg-[#fffdf9] border-r-4 border-[#c9a452] shadow-2xs">
-                        <span className="text-[11px] font-black text-[#2b124c] block">
-                          2. اختراق الحوكمة وتدخل الوسيط (نوفل)
-                        </span>
-                        <p className="text-[11px] text-[#4a3963] mt-0.5">
-                          محاولة فرض عمولة قسرية (50 ر.ع لكل شحنة) واحتجاز الشاحنات 4 أيام رغم سداد 700 ر.ع مقدم نقل.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
+                  {renderSectionAudioButton('section1', 'استماع للمقدمة')}
                 </div>
 
-                {/* Bottom Two Deep-Purple & Gold KPI Stat Blocks */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-5">
-                  <div className="royal-purple-box rounded-2xl p-6 text-center">
-                    <div className="text-3xl sm:text-4xl font-black gold-glow-text tabular-nums">
+                <p className="text-[#f8f3e6] text-xs sm:text-sm leading-[1.95] mt-4">
+                  في شهر مايو من عام 2026م، عقب واقعة إغلاق مستودع تجارة الأعلاف في صلالة، بادر المستثمر الوطني{' '}
+                  <strong className="text-[#e7cb82] font-extrabold">
+                    (شركة بن كليلة العامري للتجارة والاستثمار)
+                  </strong>{' '}
+                  بتأسيس خط تصدير وطني مباشر نحو دولة الإمارات العربية المتحدة يواكب مستهدفات التنويع الاقتصادي ورؤية عُمان 2040، بعقد توريد استراتيجي سنوي بقيمة{' '}
+                  <span className="gold-metallic-card font-black px-2.5 py-0.5 rounded mx-0.5 tabular-nums">
+                    1,870,000 ريال عماني (1.87 مليون ر.ع)
+                  </span>{' '}
+                  لصالح العميل النهائي{' '}
+                  <strong className="text-[#e7cb82] font-extrabold">
+                    (مزرعة بركة الوقن - العين)
+                  </strong>{' '}
+                  التي تضم 160 ألف طير، مع التزام نقدي مسبق بنسبة 100% بإجمالي{' '}
+                  <strong className="text-[#fff2c6] font-black tabular-nums">
+                    18,640 ر.ع
+                  </strong>{' '}
+                  لكل دورة تشغيلية (16 تريلا كل 40 يوماً) وسداد{' '}
+                  <strong className="text-[#fff2c6] font-black tabular-nums">
+                    700 ر.ع
+                  </strong>{' '}
+                  نقداً مقدماً لتغطية نقل الشحنتين الثالثة والرابعة.
+                </p>
+
+                {/* Financial KPI Cards (Exclusively in 1. المقدمة) */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-5">
+                  <div className="royal-purple-box rounded-2xl p-4 text-center border border-[#c9a452]">
+                    <div className="text-2xl sm:text-3xl font-black gold-glow-text tabular-nums">
                       1,870,000 OMR
                     </div>
-                    <p className="text-xs sm:text-sm text-[#f3dfa6] font-bold mt-2">
+                    <p className="text-xs text-[#f3dfa6] font-bold mt-1.5">
                       القيمة الإجمالية لعقد التصدير غير النفطي (100 أسبوع) لصالح مزرعة بركة الوقن
                     </p>
                   </div>
 
-                  <div className="royal-purple-box rounded-2xl p-6 text-center">
-                    <div className="text-3xl sm:text-4xl font-black gold-glow-text tabular-nums">
+                  <div className="royal-purple-box rounded-2xl p-4 text-center border border-[#c9a452]">
+                    <div className="text-2xl sm:text-3xl font-black gold-glow-text tabular-nums">
                       100% (18,640 ر.ع)
                     </div>
-                    <p className="text-xs sm:text-sm text-[#f3dfa6] font-bold mt-2">
+                    <p className="text-xs text-[#f3dfa6] font-bold mt-1.5">
                       سداد نقدي مسبق بالكامل لكل دفعة تشغيلية لشحنات الـ 16 تريلا (لكل دورة 40 يوماً)
                     </p>
                   </div>
+
+                  <div className="royal-purple-box rounded-2xl p-4 text-center border border-[#c9a452]">
+                    <div className="text-2xl sm:text-3xl font-black gold-glow-text tabular-nums">
+                      700 ر.ع
+                    </div>
+                    <p className="text-xs text-[#f3dfa6] font-bold mt-1.5">
+                      دفعة النقل المسددة نقداً مقدماً لتسيير الشحنتين الثالثة والرابعة ضمن جدول 28 أبريل
+                    </p>
+                  </div>
                 </div>
-              </div>
 
-              <div className="gold-metallic-ribbon py-2.5 px-4 text-center text-xs sm:text-sm font-black">
-                جاهزية مالية ولوجستية 100% + منتج وطني عُماني = ضرورة تمكين الصادرات غير النفطية في
-                مسار رؤية عُمان 2040
-              </div>
-            </section>
+                {/* Fleet Media Switcher (Trucks & Warehouses Only) */}
+                <div className="mt-5 bg-[#140526]/75 border border-[#c9a452]/70 rounded-2xl p-4">
+                  {(() => {
+                    const currentItem = fleetPhotos[selectedFleetIdx] || FLEET_PHOTOS[0];
+                    const posY = typeof currentItem.posY === 'number' ? currentItem.posY : 50;
+                    const posX = typeof currentItem.posX === 'number' ? currentItem.posX : 50;
+                    const itemScale =
+                      typeof currentItem.scale === 'number' ? currentItem.scale : 100;
+                    const fitMode = currentItem.fitMode || 'cover';
+                    const isVideoSlot = currentItem.mediaType === 'video';
+                    const displayBadge =
+                      currentItem.badge &&
+                      (currentItem.badge.includes('16 تريلا') ||
+                        currentItem.badge.includes('أسطول'))
+                        ? 'جدول 16 تريلا'
+                        : currentItem.badge;
 
-            {/* B. THE GOLDEN SQUARE ARCHITECTURE */}
-            <section className="bg-[#faf7f0] rounded-3xl shadow-xl border-2 border-[#c9a452] overflow-hidden">
-              <div className="p-6 sm:p-8">
-                <div className="text-center mb-7">
-                  <span className="text-xs font-extrabold text-[#9c7625] tracking-wider block">
-                    المرتكزات الأربعة للملف الرقابي | ملف المراجع: الفاضل خالد المسروري
+                    return (
+                      <>
+                        <div
+                          onClick={() => {
+                            setIsModalFullscreen(true);
+                            setModalFitMode('contain');
+                            setModalZoomScale(100);
+                            setActiveModalVideo({
+                              id: `slot-${selectedFleetIdx}`,
+                              url: currentItem.url,
+                              title:
+                                currentItem.title ||
+                                `مرفق أسطول الشاحنات والمخازن رقم ${selectedFleetIdx + 1}`,
+                              subtitle: 'معاينة بملء الشاشة الكاملة لأسطول الشاحنات والمخازن',
+                              badge: displayBadge || 'جدول 16 تريلا',
+                              durationLabel: isVideoSlot ? 'فيديو ميداني' : 'صورة ميدانية',
+                              hasAudio: false,
+                              mediaType: isVideoSlot ? 'video' : 'image',
+                            });
+                          }}
+                          className={`${
+                            isShowcaseExpanded ? 'h-72 sm:h-88' : 'h-52 sm:h-60'
+                          } rounded-xl border-2 border-[#c9a452] overflow-hidden relative bg-[#1c0b33] select-none transition-all cursor-pointer`}
+                        >
+                          {isVideoSlot ? (
+                            <video
+                              key={currentItem.url}
+                              src={currentItem.url}
+                              autoPlay
+                              muted
+                              loop
+                              playsInline
+                              style={{
+                                objectPosition: `${posX}% ${posY}%`,
+                                transform: `scale(${itemScale / 100})`,
+                              }}
+                              className={`w-full h-full pointer-events-none transition-transform duration-200 ${
+                                fitMode === 'contain' ? 'object-contain' : 'object-cover'
+                              }`}
+                            />
+                          ) : (
+                            <img
+                              src={currentItem.url}
+                              alt={currentItem.title || ''}
+                              draggable={false}
+                              style={{
+                                objectPosition: `${posX}% ${posY}%`,
+                                transform: `scale(${itemScale / 100})`,
+                              }}
+                              className={`w-full h-full pointer-events-none transition-transform duration-200 ${
+                                fitMode === 'contain' ? 'object-contain' : 'object-cover'
+                              }`}
+                            />
+                          )}
+                          <span className="absolute bottom-2.5 right-2.5 royal-purple-box text-[#f3dfa6] text-[10px] font-bold px-2.5 py-1 rounded-md flex items-center gap-1 shadow-md pointer-events-none">
+                            {isVideoSlot ? (
+                              <Film className="w-3 h-3 text-[#e7cb82]" />
+                            ) : (
+                              <ImageIcon className="w-3 h-3 text-[#e7cb82]" />
+                            )}
+                            <span>{displayBadge}</span>
+                          </span>
+                        </div>
+
+                        <div className="mt-2.5 flex items-center justify-between gap-1.5 flex-wrap no-print">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {fleetPhotos.map((item, i) => {
+                              const isVid = item.mediaType === 'video';
+                              return (
+                                <button
+                                  key={`${item.url}-${i}`}
+                                  type="button"
+                                  onClick={() => setSelectedFleetIdx(i)}
+                                  className={`text-[10px] font-bold px-2.5 py-1 rounded-md border transition-colors cursor-pointer flex items-center gap-1 ${
+                                    selectedFleetIdx === i
+                                      ? 'gold-metallic-card'
+                                      : 'bg-[#2b124c] text-[#f3dfa6] border-[#c9a452]/60'
+                                  }`}
+                                >
+                                  {isVid ? (
+                                    <Film className="w-3 h-3" />
+                                  ) : (
+                                    <ImageIcon className="w-3 h-3 opacity-75" />
+                                  )}
+                                  <span>شاحنة/مخزن {i + 1}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {renderRecordingVerbatimBox('section1')}
+              </div>
+            </div>
+          </section>
+
+          {/* 2. مذكرة الأسئلة الاستيضاحية الـ 12 (التسجيل الصوتي الجديد) */}
+          <div className="max-w-5xl w-full mx-auto px-4 mt-6 mb-10 relative z-20">
+            <section
+              id="section-clarification-questions"
+              className={`bg-[#faf7f0] rounded-3xl shadow-xl border-2 transition-all p-6 sm:p-8 ${
+                isClarificationPlaying
+                  ? 'border-[#e7cb82] ring-2 ring-[#c9a452]/50'
+                  : 'border-[#c9a452]'
+              }`}
+            >
+              {/* Unified Audio Recording Selector Bar (Dropdown Menu + Clean Ministerial Tabs) */}
+              <div className="mb-6 p-4 rounded-2xl bg-[#1f0b38]/85 border border-[#c9a452] flex flex-wrap items-center justify-between gap-3 no-print">
+                <div className="flex items-center gap-2.5">
+                  <Volume2 className="w-4 h-4 text-[#e7cb82] shrink-0" />
+                  <span className="text-xs font-black text-[#f3dfa6]">
+                    مشغل التسجيلات الصوتية الرسمية المعتمدة (منقحة بدون أي تكرار):
                   </span>
-                  <h3 className="text-xl sm:text-2xl font-black text-[#2b124c] mt-1">
-                    المربع الذهبي: منظومة التصدير الوطني في مسار رؤية عُمان 2040
-                  </h3>
                 </div>
 
-                {/* 4 Royal Purple Nodes around Central Gold Medallion */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-center">
-                  {/* Right 2 Nodes */}
-                  <div className="lg:col-span-4 space-y-4">
-                    <div className="royal-node-card rounded-2xl p-4 text-center">
-                      <span className="text-[#e7cb82] text-xs font-black block">
-                        المرتكز أ: المصدّر الوطني
-                      </span>
-                      <h4 className="text-white font-extrabold text-sm mt-1">
-                        شركة بن كليلة العامري للتجارة والاستثمار
-                      </h4>
-                      <p className="text-[#e8dff5] text-[11px] leading-relaxed mt-1.5">
-                        سداد نقدي مسبق 100% (18,640 ر.ع) وتسيير 16 تريلا لكل دورة تشغيلية (40 يوماً) من صلالة
-                        ومسقط.
-                      </p>
-                    </div>
+                <div className="flex flex-wrap items-center gap-2 flex-1 sm:flex-initial justify-end">
+                  <select
+                    aria-label="اختيار التسجيل الصوتي المعتمد"
+                    value={selectedApprovedRecordingId}
+                    onChange={(e) => {
+                      const recId = e.target.value;
+                      setSelectedApprovedRecordingId(recId);
+                      if (recId === 'rec-01-intro') {
+                        playElevenLabsSegment('hero', 0, SECTION_TIMESTAMPS.hero.end, 0, false);
+                      } else if (recId === 'clarification-questions') {
+                        playClarificationQuestions(0, null, 'clarification-full', true);
+                      } else if (recId === 'rec-03-commitment') {
+                        playElevenLabsSegment('section1', SECTION_TIMESTAMPS.section1.start, SECTION_TIMESTAMPS.section1.end, 1, false);
+                      } else if (recId === 'rec-04-noufal') {
+                        playElevenLabsSegment('section3', SECTION_TIMESTAMPS.section3.start, SECTION_TIMESTAMPS.section3.end, 2, false);
+                      } else if (recId === 'rec-06-coa') {
+                        playElevenLabsSegment('section2', SECTION_TIMESTAMPS.section2.start, SECTION_TIMESTAMPS.section2.end, 3, false);
+                      } else if (recId === 'rec-05-legal') {
+                        playElevenLabsSegment('section5', SECTION_TIMESTAMPS.section5.start, SECTION_TIMESTAMPS.section5.end, 4, false);
+                      } else if (recId === 'executive-appeal') {
+                        playExecutiveAppeal(0, null, 'exec-appeal-full', true);
+                      } else if (recId === 'main-dossier') {
+                        startFullInteractivePresentation();
+                      }
+                    }}
+                    className="bg-[#140526] border border-[#c9a452] text-[#f3dfa6] rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#e7cb82] cursor-pointer"
+                  >
+                    {APPROVED_AUDIO_RECORDINGS.map((rec) => (
+                      <option key={rec.id} value={rec.id}>
+                        {rec.title} ({rec.durationLabel})
+                      </option>
+                    ))}
+                  </select>
 
-                    <div className="royal-node-card rounded-2xl p-4 text-center">
-                      <span className="text-[#e7cb82] text-xs font-black block">
-                        المرتكز ب: العميل النهائي المستورد
-                      </span>
-                      <h4 className="text-white font-extrabold text-sm mt-1">
-                        مزرعة بركة الوقن (العين - الإمارات)
-                      </h4>
-                      <p className="text-[#e8dff5] text-[11px] leading-relaxed mt-1.5">
-                        عقد توريد استراتيجي لمدة 100 أسبوع بقيمة 1.87 مليون ريال عُماني وتمسك كامل
-                        بالناقل الوطني.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Center Golden Medallion */}
-                  <div className="lg:col-span-4 flex flex-col items-center justify-center py-2">
-                    <div className="w-48 h-48 rounded-full gold-metallic-card border-4 border-[#fff2c6] shadow-2xl flex flex-col items-center justify-center text-center p-4 relative">
-                      <Award className="w-7 h-7 text-[#2b124c] mb-1" />
-                      <span className="text-[11px] font-black text-[#492b09]">مستهدفات</span>
-                      <span className="text-lg font-black text-[#1e0b36] leading-tight mt-0.5">
-                        رؤية عُمان 2040
-                      </span>
-                      <span className="text-[11px] font-extrabold text-[#2b124c] mt-1">
-                        حماية الصادرات غير النفطية
-                      </span>
-                      <span className="mt-1.5 bg-[#2b124c] text-[#e7cb82] text-[9px] font-bold px-2.5 py-0.5 rounded-full">
-                        الفاضل خالد المسروري
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Left 2 Nodes */}
-                  <div className="lg:col-span-4 space-y-4">
-                    <div className="royal-node-card rounded-2xl p-4 text-center">
-                      <span className="text-[#e7cb82] text-xs font-black block">
-                        المرتكز ج: المطابقة الفنية (ISO 17025)
-                      </span>
-                      <h4 className="text-white font-extrabold text-sm mt-1">
-                        تطابق شهادة (COA) والبطاقة التعريفية
-                      </h4>
-                      <p className="text-[#e8dff5] text-[11px] leading-relaxed mt-1.5">
-                        معالجة التناقض المستندي الذي تسبب في إغلاق الطلب رقم (APH-12052026-3382929)
-                        بنظام MOCCAE.
-                      </p>
-                    </div>
-
-                    <div className="royal-node-card rounded-2xl p-4 text-center">
-                      <span className="text-[#e7cb82] text-xs font-black block">
-                        المرتكز د: الحوكمة ومنع الاحتكار
-                      </span>
-                      <h4 className="text-white font-extrabold text-sm mt-1">
-                        كفّ يد الوسيط الخارجي (نوفل)
-                      </h4>
-                      <p className="text-[#e8dff5] text-[11px] leading-relaxed mt-1.5">
-                        تطبيق المرسوم السلطاني 67/2014 (المادتين 9 و10) والمرسوم 29/2013 (المادة
-                        381).
-                      </p>
-                    </div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {APPROVED_AUDIO_RECORDINGS.map((rec) => {
+                      const isActiveRec =
+                        (rec.id === 'rec-01-intro' && activeAudioId === 'hero') ||
+                        (rec.id === 'clarification-questions' && isClarificationPlaying) ||
+                        (rec.id === 'rec-03-commitment' && activeAudioId === 'section1') ||
+                        (rec.id === 'rec-04-noufal' && activeAudioId === 'section3') ||
+                        (rec.id === 'rec-06-coa' && activeAudioId === 'section2') ||
+                        (rec.id === 'rec-05-legal' && activeAudioId === 'section5') ||
+                        (rec.id === 'executive-appeal' && isExecAppealPlaying) ||
+                        (rec.id === 'main-dossier' && isFullPresentationPlaying);
+                      return (
+                        <button
+                          key={rec.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedApprovedRecordingId(rec.id);
+                            if (rec.id === 'rec-01-intro') {
+                              playElevenLabsSegment('hero', 0, SECTION_TIMESTAMPS.hero.end, 0, false);
+                            } else if (rec.id === 'clarification-questions') {
+                              playClarificationQuestions(0, null, 'clarification-full', false);
+                            } else if (rec.id === 'rec-03-commitment') {
+                              playElevenLabsSegment('section1', SECTION_TIMESTAMPS.section1.start, SECTION_TIMESTAMPS.section1.end, 1, false);
+                            } else if (rec.id === 'rec-04-noufal') {
+                              playElevenLabsSegment('section3', SECTION_TIMESTAMPS.section3.start, SECTION_TIMESTAMPS.section3.end, 2, false);
+                            } else if (rec.id === 'rec-06-coa') {
+                              playElevenLabsSegment('section2', SECTION_TIMESTAMPS.section2.start, SECTION_TIMESTAMPS.section2.end, 3, false);
+                            } else if (rec.id === 'rec-05-legal') {
+                              playElevenLabsSegment('section5', SECTION_TIMESTAMPS.section5.start, SECTION_TIMESTAMPS.section5.end, 4, false);
+                            } else if (rec.id === 'executive-appeal') {
+                              playExecutiveAppeal(0, null, 'exec-appeal-full', true);
+                            } else {
+                              startFullInteractivePresentation();
+                            }
+                          }}
+                          className={`px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                            isActiveRec
+                              ? 'gold-metallic-card'
+                              : 'bg-[#2b124c] hover:bg-[#381960] text-[#f3dfa6] border-[#c9a452]/70'
+                          }`}
+                        >
+                          {isActiveRec ? (
+                            <Pause className="w-3 h-3 fill-current" />
+                          ) : (
+                            <Play className="w-3 h-3 fill-current" />
+                          )}
+                          <span>{rec.badge}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
 
-              <div className="gold-metallic-ribbon py-2.5 px-4 text-center text-xs sm:text-sm font-black">
-                شركة بن كليلة العامري للتجارة والاستثمار · نموذج وطني لتعزيز الصادرات غير النفطية
+              {/* Section Header */}
+              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
+                <div className="flex items-start gap-3.5">
+                  <div className="w-12 h-12 rounded-2xl royal-purple-box text-[#e7cb82] font-black text-xs flex flex-col items-center justify-center shrink-0 border border-[#c9a452]">
+                    <Volume2 className="w-4 h-4 text-[#e7cb82]" />
+                    <span className="text-[10px] mt-0.5 tabular-nums">06:58</span>
+                  </div>
+                  <div>
+                    <span className="text-[#9c7625] text-xs font-extrabold block">
+                      مذكرة الاستيضاح الرسمية بعد العنوان والمقدمة | ملف المراجع: الفاضل خالد المسروري
+                    </span>
+                    <h3 className="text-[#2b124c] text-lg sm:text-2xl font-black mt-0.5">
+                      مذكرة الأسئلة الاستيضاحية الـ 12 الموجهة رسمياً وكتابياً إلى إدارة المصنع
+                    </h3>
+                    <p className="text-[#4a3963] text-xs mt-1">
+                      النص الرسمي المطابق للتسجيل الصوتي والمتواكب تنازلياً مع التحدث بهدوء ووضوح تام من بدايته وحتى نهايته
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap no-print">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      playClarificationQuestions(0, null, 'clarification-full', false)
+                    }
+                    className={`px-5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-md ${
+                      isClarificationPlaying
+                        ? 'bg-[#2b124c] text-[#e7cb82] border border-[#e7cb82]'
+                        : 'gold-metallic-card hover:brightness-105'
+                    }`}
+                  >
+                    {isClarificationPlaying ? (
+                      <>
+                        <Pause className="w-4 h-4 fill-current" />
+                        <span>إيقاف مؤقت ({formatTime(clarificationTime)})</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-4 h-4 fill-current" />
+                        <span>تشغيل مذكرة الأسئلة الاستيضاحية</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (clarificationAudioRef.current) {
+                        clarificationAudioRef.current.currentTime = 0;
+                        setClarificationTime(0);
+                      }
+                      playClarificationQuestions(0, null, 'clarification-full', false);
+                    }}
+                    className="px-3 py-2.5 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#c9a452] text-[#f3dfa6] text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-[#e7cb82]" />
+                    <span>من البداية</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Calm Ministerial Audio Deck & Timeline Bar */}
+              <div className="mt-5 royal-purple-box rounded-2xl p-4 sm:p-5 border border-[#c9a452] no-print">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#c9a452]/35">
+                  <div className="flex items-center gap-2">
+                    <span className="gold-metallic-card text-[10px] font-black px-2.5 py-0.5 rounded-md">
+                      {isClarificationPlaying ? 'يتلو الآن بالتواكب التنازلي' : 'جاهز للتشغيل'}
+                    </span>
+                    <span className="text-xs font-extrabold text-[#f3dfa6]">
+                      {activeClarificationGroup.title}
+                    </span>
+                  </div>
+                  <span className="font-mono text-xs font-bold text-[#e7cb82] bg-black/35 px-3 py-1 rounded-lg border border-[#c9a452]/40 tabular-nums">
+                    {formatTime(clarificationTime)} / {formatTime(clarificationDuration)}
+                  </span>
+                </div>
+
+                <div className="mt-3 space-y-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={clarificationDuration || 418}
+                    step={0.1}
+                    value={clarificationTime}
+                    onChange={(e) => {
+                      const nextTime = parseFloat(e.target.value);
+                      setClarificationTime(nextTime);
+                      if (clarificationAudioRef.current) {
+                        clarificationAudioRef.current.currentTime = nextTime;
+                      }
+                    }}
+                    className="w-full accent-[#e7cb82] cursor-pointer h-1.5 rounded-lg"
+                  />
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    {CLARIFICATION_QUESTIONS_GROUPS.map((grp) => {
+                      const isCurrentGrp =
+                        isClarificationPlaying &&
+                        clarificationTime >= grp.start &&
+                        clarificationTime < grp.end;
+                      return (
+                        <button
+                          key={grp.id}
+                          type="button"
+                          onClick={() =>
+                            playClarificationQuestions(grp.start, null, 'clarification-full', false)
+                          }
+                          className={`px-2.5 py-1.5 rounded-xl text-[10px] font-bold border cursor-pointer transition-all ${
+                            isCurrentGrp
+                              ? 'gold-metallic-card'
+                              : 'bg-[#1a0833] hover:bg-[#280e4a] text-[#f3dfa6] border-[#c9a452]/50'
+                          }`}
+                        >
+                          {grp.badge} ({grp.timeRange})
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Downward Synchronized Verbatim Groups & Sentences (Clean, Calm Ministerial Layout Without Word Highlighting) */}
+              <div className="mt-6 space-y-5">
+                {CLARIFICATION_QUESTIONS_GROUPS.map((grp) => {
+                  const isGrpActive =
+                    isClarificationPlaying &&
+                    clarificationTime >= grp.start &&
+                    clarificationTime < grp.end;
+
+                  return (
+                    <div
+                      key={grp.id}
+                      id={`clar-group-${grp.id}`}
+                      className={`rounded-2xl border p-5 transition-colors bg-[#1f0b38]/85 ${
+                        isGrpActive
+                          ? 'border-[#e7cb82] shadow-lg'
+                          : 'border-[#c9a452]/70'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#c9a452]/35">
+                        <div>
+                          <span className="text-[11px] font-extrabold text-[#e7cb82] block">
+                            {grp.badge} · ({grp.timeRange})
+                          </span>
+                          <h4 className="text-sm sm:text-base font-black text-[#f3dfa6] mt-0.5">
+                            {grp.title}
+                          </h4>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            playClarificationQuestions(grp.start, grp.end, grp.id, false)
+                          }
+                          className="no-print px-3 py-1.5 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#c9a452] text-[#f3dfa6] text-[11px] font-bold flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Volume2 className="w-3.5 h-3.5 text-[#e7cb82]" />
+                          <span>استماع لهذا القسم ({grp.timeRange})</span>
+                        </button>
+                      </div>
+
+                      <div className="mt-3.5 space-y-2.5">
+                        {grp.sentences
+                          .filter((s) => s.text.trim().length > 0)
+                          .map((sent) => {
+                            const isSentSpeaking =
+                              isClarificationPlaying &&
+                              clarificationTime >= sent.start &&
+                              clarificationTime < sent.end;
+
+                            return (
+                              <div
+                                key={sent.id}
+                                id={`clar-sentence-${sent.id}`}
+                                onClick={() =>
+                                  playClarificationQuestions(
+                                    sent.start,
+                                    null,
+                                    'clarification-full',
+                                    false
+                                  )
+                                }
+                                className={`rounded-xl p-3.5 border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                                  isSentSpeaking
+                                    ? 'bg-[#2b124c] border-[#e7cb82] shadow-md'
+                                    : 'bg-[#1a0833]/55 border-[#c9a452]/35 hover:border-[#c9a452]'
+                                }`}
+                              >
+                                <p className="text-xs sm:text-sm leading-[1.95] font-semibold text-[#f8f3e6]">
+                                  {sent.text}
+                                </p>
+                                <span className="font-mono text-[10px] font-bold px-2.5 py-1 rounded-md bg-black/35 text-[#e7cb82] border border-[#c9a452]/40 shrink-0 self-end sm:self-center tabular-nums">
+                                  {sent.timeLabel}
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </section>
           </div>
 
-          {/* 4. MAIN SECTIONS CONTAINER (STARTING WITH DEDICATED EXECUTIVE SUMMARY & FINAL APPEAL AUDIO SECTION) */}
+          {/* 3 -> 4 -> 5 -> 6: التسلسل الإجباري للأقسام الرئيسية بدون أي تكرار للمعلومات المحظورة */}
           <main className="max-w-5xl w-full mx-auto px-4 mt-8 space-y-7">
-            {/* DEDICATED SECTION FOR THE NEW AUDIO RECORDING: EXECUTIVE SUMMARY & FINAL APPEAL WITH VERBATIM WORD-BY-WORD SYNC */}
-            <section
-              id="section-executive-appeal"
-              className={`bg-[#faf7f0] rounded-3xl shadow-2xl border-2 transition-all p-6 sm:p-8 ${
-                isExecAppealPlaying
-                  ? 'border-[#e7cb82] ring-4 ring-[#c9a452]/50'
+            {/* 3. الوقائع والتدخل الأجنبي (نوفل) */}
+            <article
+              id="section-03"
+              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-colors p-6 sm:p-8 ${
+                activeAudioId === 'section3'
+                  ? 'border-[#e7cb82]'
                   : 'border-[#c9a452]'
               }`}
             >
-              {/* Section Header */}
+              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
+                    03
+                  </div>
+                  <div>
+                    <span className="text-[#9c7625] text-xs font-extrabold block">
+                      3. الوقائع والتدخل الأجنبي (نوفل) — سلاسل الإمداد والحوكمة
+                    </span>
+                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
+                      الوقائع والتدخل الأجنبي (نوفل): احتجاز الشاحنات ومحاولة إقصاء المستثمر الوطني
+                    </h3>
+                  </div>
+                </div>
+                {renderSectionAudioButton('section3', 'استماع للقسم الثالث')}
+              </div>
+
+              <p className="text-[#3b2954] text-xs sm:text-sm leading-[1.95] mt-5">
+                تُثبت الوقائع الميدانية أن عرقلة وحجب الأوراق البيطرية كانت تهدف إلى إحراق الوقت
+                واستنفاد مخزون الأعلاف لدى العميل النهائي{' '}
+                <strong className="text-[#2b124c] font-extrabold">
+                  (مزرعة بركة الوقن التي تضم 160 ألف طير)
+                </strong>{' '}
+                لدفع مسار التصدير قسراً نحو الوسيط الأجنبي{' '}
+                <strong className="text-[#2b124c] font-extrabold">
+                  (المدعو نوفل / أطياف جلوبال للتجارة FZC - المسجلة بمنطقة حرة بعجمان)
+                </strong>
+                ؛ حيث تحوّل هذا الوسيط إلى أداة ضغط وإقصاء للمستثمر الوطني عبر مسارين موثقين:
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
+                <div className="royal-node-card rounded-2xl p-5 text-white">
+                  <div className="w-7 h-7 rounded-lg gold-metallic-card font-black text-xs flex items-center justify-center mb-3 tabular-nums">
+                    1
+                  </div>
+                  <h4 className="text-[#e7cb82] font-black text-sm">
+                    فرض الوسيط الأجنبي (نوفل) والعمولات القسرية
+                  </h4>
+                  <p className="text-[#e8dff5] text-xs leading-relaxed mt-2">
+                    تعمد حجب الأوراق البيطرية لوضع المزرعة أمام خطر نفاد العلف عن 160 ألف طير،
+                    ومحاولة فرض الوسيط الأجنبي <strong className="text-white">(نوفل)</strong>{' '}
+                    بعمولة إضافية قدرها 50 ريالاً عمانياً عن كل شحنة دون أي سند تعاقدي أو قيمة مضافة،
+                    مع تمسك إدارة المزرعة بعقدها المباشر مع{' '}
+                    <strong className="text-[#f3dfa6]">
+                      شركة بن كليلة العامري للتجارة والاستثمار
+                    </strong>{' '}
+                    ورفضها التام للتعامل مع الوسيط الأجنبي.
+                  </p>
+                </div>
+
+                <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-5">
+                  <div className="w-7 h-7 rounded-lg bg-[#2b124c] text-[#e7cb82] font-black text-xs flex items-center justify-center mb-3 tabular-nums">
+                    2
+                  </div>
+                  <h4 className="text-[#2b124c] font-black text-sm">
+                    احتجاز الشاحنات المحملة لمدة 4 أيام متتالية
+                  </h4>
+                  <p className="text-[#3b2954] text-xs leading-relaxed mt-2">
+                    في واقعة موثقة، تسلّم الوسيط الأجنبي{' '}
+                    <strong className="text-[#2b124c]">(نوفل)</strong> دفعة النقل المقدمة نقداً، ومع
+                    ذلك قام باحتجاز الشاحنات المحملة لمدة أربعة أيام متتالية مع إغلاق الهواتف وتجاهل
+                    اتصالات الشركة، بينما سمح المصنع في ذات التوقيت للوسيط الأجنبي بتحميل الشاحنات
+                    فوراً من البوابات في حين اعتذر للمستثمر الوطني بعدم توفر الإنتاج.
+                  </p>
+                </div>
+              </div>
+
+              {renderRecordingVerbatimBox('section3')}
+            </article>
+
+            {/* 4. الفخ المستندي (COA) */}
+            <article
+              id="section-02"
+              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-colors p-6 sm:p-8 ${
+                activeAudioId === 'section2'
+                  ? 'border-[#e7cb82]'
+                  : 'border-[#c9a452]'
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
+                    04
+                  </div>
+                  <div>
+                    <span className="text-[#9c7625] text-xs font-extrabold block">
+                      4. الفخ المستندي (COA) — المطابقة الفنية والمختبرية (ISO 17025)
+                    </span>
+                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
+                      الفخ المستندي (COA): تناقض شهادة التحليل مع البطاقة التعريفية وإقرار Layer 16%
+                    </h3>
+                  </div>
+                </div>
+                {renderSectionAudioButton('section2', 'استماع للقسم الرابع')}
+              </div>
+
+              <p className="text-[#3b2954] text-xs sm:text-sm leading-[1.95] mt-5">
+                تكشف السجلات الرسمية عن فخ إجرائي وفني نُصب للمستثمر الوطني عبر تسليمه وثائق متضاربة
+                صادرة عن ذات الجهة (شركة المطاحن العمانية)، مما ترتب عليه إغلاق تسجيل المنتج
+                في النظام الرقمي الإماراتي التابع لوزارة التغير المناخي والبيئة (MOCCAE) تحت الطلب
+                المقيد برقم:{' '}
+                <span className="bg-[#2b124c] border border-[#c9a452] text-[#e7cb82] font-mono text-xs font-bold px-2.5 py-0.5 rounded tabular-nums">
+                  (APH-12052026-3382929)
+                </span>
+                .
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
+                <div className="royal-node-card rounded-2xl p-5 text-white">
+                  <div className="flex items-center gap-2 text-[#e7cb82] font-black text-xs sm:text-sm">
+                    <AlertCircle className="w-4 h-4 text-[#e7cb82] shrink-0" />
+                    <span>شهادة التحليل المخبري (COA) مقابل البطاقة التعريفية</span>
+                  </div>
+                  <p className="text-[#e8dff5] text-xs leading-relaxed mt-2.5">
+                    تثبت شهادة التحليل المخبري (COA) الصادرة عن دائرة الجودة بالمصنع أن المنتج{' '}
+                    <strong className="font-black text-[#f3dfa6] underline">
+                      خالٍ تماماً من مضادات الكوكسيديا (Anticoccidials) بنسبة صفرية (0%)
+                    </strong>
+                    ، بينما تُدرج البطاقة التعريفية (Label) المطبوعة على الكيس وجود برنامج تدوير
+                    لمضادات الكوكسيديا وفترة سحب لا تقل عن 7 أيام، وعند طلب التصحيح جاء الرد: «هذا
+                    يحتاج طباعة من جديد ومكلف!».
+                  </p>
+                </div>
+
+                <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-5">
+                  <div className="flex items-center gap-2 text-[#2b124c] font-black text-xs sm:text-sm">
+                    <FileText className="w-4 h-4 text-[#9c7625] shrink-0" />
+                    <span>فخ إقرار سلامة علف البياض (Layer 16%) غير المتعاقد عليه</span>
+                  </div>
+                  <p className="text-[#3b2954] text-xs leading-relaxed mt-2.5">
+                    رغم أن التعاقد والتصدير مخصص بالكامل لأعلاف التسمين (Broiler Starter & Finisher)،
+                    قامت إدارة التصدير بإرسال إقرار سلامة لمنتج علف بياض فقط{' '}
+                    <strong className="font-black text-[#2b124c]">(Layer 16%)</strong> لم يتم شراؤه
+                    أصلاً، مما يعرض الشحنات الفعلية للرفض الجمركي الفوري والمساءلة القانونية في
+                    المنافذ.
+                  </p>
+                </div>
+              </div>
+
+              {renderRecordingVerbatimBox('section2')}
+            </article>
+
+            {/* 5. التأصيل القانوني */}
+            <article
+              id="section-05"
+              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-colors p-6 sm:p-8 ${
+                activeAudioId === 'section5'
+                  ? 'border-[#e7cb82]'
+                  : 'border-[#c9a452]'
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
+                    05
+                  </div>
+                  <div>
+                    <span className="text-[#9c7625] text-xs font-extrabold block">
+                      5. التأصيل القانوني — التكييف التشريعي والرقابي الحصري
+                    </span>
+                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
+                      التأصيل القانوني: المرسوم السلطاني 67/2014 والمرسوم السلطاني 29/2013
+                    </h3>
+                  </div>
+                </div>
+                {renderSectionAudioButton('section5', 'استماع للقسم الخامس')}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
+                <div className="royal-node-card rounded-2xl p-5 text-white">
+                  <span className="text-[#e7cb82] text-xs font-extrabold block">
+                    المرسوم السلطاني رقم 67/2014
+                  </span>
+                  <h4 className="text-white font-black text-sm sm:text-base mt-1">
+                    قانون حماية المنافسة ومنع الاحتكار (المادتان 9 و10)
+                  </h4>
+                  <p className="text-[#e8dff5] text-xs leading-relaxed mt-3">
+                    تحظر المادتان (9 و10) قطعياً إساءة استغلال الوضع المهيمن، والتفرقة في المعاملة بين
+                    المتعاملين في العقود المتكافئة، والامتناع عن التعامل أو تقييد التوريد دون مسوغ
+                    قانوني؛ حيث يُشكّل حجب المستندات الإلزامية اللازمة لعبور البضاعة عبر المنافذ{' '}
+                    <strong className="font-black text-[#f3dfa6]">
+                      امتناعاً تعسفياً مقنّعاً عن البيع وممارسة احتكارية مقيدة للمنافسة.
+                    </strong>
+                  </p>
+                </div>
+
+                <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-5">
+                  <span className="text-[#9c7625] text-xs font-extrabold block">
+                    المرسوم السلطاني رقم 29/2013
+                  </span>
+                  <h4 className="text-[#2b124c] font-black text-sm sm:text-base mt-1">
+                    قانون المعاملات المدنية (المادة 381 والمادتان 155 و156)
+                  </h4>
+                  <p className="text-[#3b2954] text-xs leading-relaxed mt-3">
+                    تلزم المادة (381) البائع بتسليم المبيع وملحقاته الضرورية للاستعمال المقصود؛ وفي
+                    عقود التصدير، لا يكتمل التسليم قانوناً إلا بتسليم الشهادات والمستندات المطابقة
+                    لعبور المنافذ. كما تقرر المادتان (155 و156) وجوب تنفيذ العقود بحسن نية، والمسؤولية
+                    المدنية الكاملة عن كل إخلال جسيم يلحق الضرر بالمتعاقد الآخر.
+                  </p>
+                </div>
+              </div>
+
+              {renderRecordingVerbatimBox('section5')}
+            </article>
+
+            {/* 6. الخلاصة والنداء الختامي */}
+            <section
+              id="section-executive-appeal"
+              className={`bg-[#faf7f0] rounded-3xl shadow-2xl border-2 transition-colors p-6 sm:p-8 ${
+                isExecAppealPlaying
+                  ? 'border-[#e7cb82]'
+                  : 'border-[#c9a452]'
+              }`}
+            >
               <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b-2 border-[#dccaa3]">
                 <div className="flex items-start gap-3.5">
                   <div className="w-12 h-12 rounded-2xl royal-purple-box text-[#e7cb82] font-black text-sm flex flex-col items-center justify-center shrink-0 shadow-lg border border-[#e7cb82]">
-                    <Volume2 className="w-4 h-4 text-[#e7cb82]" />
-                    <span className="text-[10px] mt-0.5 tabular-nums">03:46</span>
+                    <span className="text-xs font-black">06</span>
+                    <span className="text-[9px] mt-0.5 tabular-nums">03:46</span>
                   </div>
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="gold-metallic-card text-[10px] font-black px-2.5 py-0.5 rounded-md">
-                        التسجيل الصوتي الموثق والنص المتزامن حرفياً
+                        6. الخلاصة والنداء الختامي
                       </span>
                       <span className="text-[#9c7625] text-xs font-extrabold">
                         بصوت المستثمر الوطني: بريك بن كليلة العامري
@@ -4329,7 +4856,7 @@ export default function App() {
                       الخلاصة التنفيذية والنداء الختامي لإرساء العدالة التنافسية
                     </h3>
                     <p className="text-[#4a3963] text-xs mt-1">
-                      تمت تهيئة هذا القسم بنص مكتوب يماشي الصوت حرفياً كلمة بكلمة وثانية بثانية — اضغط على زر التشغيل أو على أي جملة للاستماع المباشر من موقعها في التسجيل
+                      نص مكتوب يواكب التسجيل الصوتي للخلاصة والنداء الختامي بهدوء ووضوح تام
                     </p>
                   </div>
                 </div>
@@ -4352,7 +4879,7 @@ export default function App() {
                     ) : (
                       <>
                         <Play className="w-4 h-4 fill-current" />
-                        <span>تشغيل التسجيل الكامل (03:46)</span>
+                        <span>تشغيل الخلاصة والنداء الختامي (03:46)</span>
                       </>
                     )}
                   </button>
@@ -4366,7 +4893,6 @@ export default function App() {
                       }
                       playExecutiveAppeal(0, null, 'exec-appeal-full', false);
                     }}
-                    title="إعادة تشغيل التسجيل من البداية (00:00)"
                     className="px-3 py-2.5 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#c9a452] text-[#f3dfa6] text-xs font-bold flex items-center gap-1.5 cursor-pointer"
                   >
                     <RotateCcw className="w-3.5 h-3.5 text-[#e7cb82]" />
@@ -4375,14 +4901,13 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Interactive Studio Audio Player Deck + Live Verbatim Teleprompter Display */}
               <div className="mt-5 royal-purple-box rounded-2xl p-5 sm:p-6 border-2 border-[#e7cb82] shadow-xl">
                 <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#c9a452]/40">
                   <div className="flex items-center gap-2">
                     <span className="gold-metallic-card text-[10px] font-black px-2.5 py-1 rounded-md flex items-center gap-1">
                       <Volume2 className="w-3.5 h-3.5 text-[#2b124c]" />
                       <span>
-                        {isExecAppealPlaying ? 'يتلو الآن حرفياً مع الصوت' : 'المشغل الصوتي المتزامن'}
+                        {isExecAppealPlaying ? 'يتلو الآن مع الصوت' : 'المشغل الصوتي المتزامن'}
                       </span>
                     </span>
                     <span className="text-xs font-extrabold text-[#f3dfa6]">
@@ -4390,57 +4915,11 @@ export default function App() {
                     </span>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs font-black text-[#e7cb82] bg-black/40 px-3 py-1 rounded-lg border border-[#c9a452]/50 tabular-nums">
-                      {formatTime(execAppealTime)} / {formatTime(execAppealDuration)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setIsGradualAutoScroll((p) => !p)}
-                      className={`px-2.5 py-1 rounded-lg text-[10px] font-black border cursor-pointer flex items-center gap-1 ${
-                        isGradualAutoScroll
-                          ? 'gold-metallic-card'
-                          : 'bg-[#1a0833] text-[#f3dfa6] border-[#c9a452]'
-                      }`}
-                    >
-                      <span>تتبع الشاشة مع الصوت: {isGradualAutoScroll ? 'مفعّل' : 'يدوي'}</span>
-                    </button>
-                  </div>
+                  <span className="font-mono text-xs font-black text-[#e7cb82] bg-black/40 px-3 py-1 rounded-lg border border-[#c9a452]/50 tabular-nums">
+                    {formatTime(execAppealTime)} / {formatTime(execAppealDuration)}
+                  </span>
                 </div>
 
-                {/* Live Active Sentence Banner (Walks literally word-by-word with the voice) */}
-                <div
-                  onClick={() =>
-                    playExecutiveAppeal(activeExecSentence.start, null, 'exec-appeal-full', false)
-                  }
-                  className="mt-4 bg-[#140526]/90 border-2 border-[#e7cb82] rounded-2xl p-4 sm:p-5 text-center cursor-pointer transition-all hover:border-white"
-                >
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <span className="text-[10px] font-mono font-bold text-[#e7cb82] bg-[#2b124c] px-2.5 py-0.5 rounded border border-[#c9a452]/60">
-                      التوقيت الحالي في التسجيل: {activeExecSentence.timeLabel}
-                    </span>
-                    {isExecAppealPlaying && (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-black text-[#1e0b36] bg-[#e7cb82] px-2 py-0.5 rounded animate-pulse">
-                        <Volume2 className="w-3 h-3" />
-                        <span>نطق متزامن كلمة بكلمة</span>
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-base sm:text-xl font-black text-[#fff2c6] leading-relaxed">
-                    «
-                    {renderGradualSyncedWords(
-                      activeExecSentence.text,
-                      activeExecSentence.start,
-                      activeExecSentence.end,
-                      execAppealTime,
-                      isExecAppealPlaying,
-                      true
-                    )}
-                    »
-                  </p>
-                </div>
-
-                {/* Interactive Timeline Seek Bar */}
                 <div className="mt-4 space-y-2 no-print">
                   <input
                     type="range"
@@ -4457,255 +4936,9 @@ export default function App() {
                     }}
                     className="w-full accent-[#e7cb82] cursor-pointer h-2 rounded-lg"
                   />
-
-                  {/* Quick Jump Buttons for the 4 Pillars */}
-                  <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => playExecutiveAppeal(0, 5.2, 'exec-intro', false)}
-                      className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black border cursor-pointer transition-all ${
-                        execAppealTime < 5.2 && isExecAppealPlaying
-                          ? 'gold-metallic-card'
-                          : 'bg-[#1a0833] hover:bg-[#280e4a] text-[#f3dfa6] border-[#c9a452]/60'
-                      }`}
-                    >
-                      العنوان الافتتاحي (00:00)
-                    </button>
-                    {EXECUTIVE_APPEAL_PILLARS.map((pil) => {
-                      const isCurrentPillar =
-                        execAppealTime >= pil.start && execAppealTime < pil.end;
-                      return (
-                        <button
-                          key={pil.id}
-                          type="button"
-                          onClick={() =>
-                            playExecutiveAppeal(pil.start, null, 'exec-appeal-full', false)
-                          }
-                          className={`flex-1 min-w-[140px] px-2.5 py-1.5 rounded-xl text-[10px] font-black border cursor-pointer transition-all flex items-center justify-center gap-1 ${
-                            isCurrentPillar
-                              ? 'gold-metallic-card shadow-md'
-                              : 'bg-[#1a0833] hover:bg-[#280e4a] text-[#f3dfa6] border-[#c9a452]/60'
-                          }`}
-                        >
-                          <Volume2 className="w-3 h-3 shrink-0" />
-                          <span className="truncate">
-                            المحور {pil.numberLabel} ({pil.timeRange})
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
               </div>
 
-              {/* Companion Interactive Conversation Evidence Preview Frame (Shows Interior WhatsApp Evidence Clearly From Outside) */}
-              {(() => {
-                const activeConvEvidence =
-                  fieldVideos[execVisualIdx % Math.max(1, fieldVideos.length)] || FIELD_VIDEOS[0];
-
-                return (
-                  <div
-                    className={`mt-5 mx-auto rounded-2xl border-2 border-[#c9a452] bg-[#f3ede0] overflow-hidden shadow-md transition-all no-print ${
-                      execWidthMode === 'normal'
-                        ? 'max-w-xl'
-                        : execWidthMode === 'wide'
-                        ? 'max-w-3xl'
-                        : 'w-full'
-                    }`}
-                  >
-                    <div
-                      onClick={() => {
-                        stopAllAudio();
-                        setIsOpeningAutoMuted(false);
-                        setIsModalFullscreen(true);
-                        setModalFitMode('contain');
-                        setModalZoomScale(100);
-                        setActiveModalVideo({
-                          ...activeConvEvidence,
-                          hasAudio: true,
-                        });
-                      }}
-                      title="اضغط على الشاشة لفتح محادثة الواتساب بملء الشاشة الكاملة بالصوت الواضح"
-                      className={`relative bg-[#140526] overflow-hidden cursor-pointer group ${
-                        execHeightMode === 'sm'
-                          ? 'h-48'
-                          : execHeightMode === 'md'
-                          ? 'h-64'
-                          : execHeightMode === 'lg'
-                          ? 'h-80'
-                          : 'h-96 sm:h-[440px]'
-                      }`}
-                    >
-                      <img
-                        src={activeConvEvidence.posterUrl || '/assets/aistudio/poster-conv-1.jpg'}
-                        alt={activeConvEvidence.title}
-                        style={{
-                          objectPosition: `50% ${execPosY}%`,
-                          transform: `scale(${execScale / 100})`,
-                        }}
-                        className="w-full h-full object-contain bg-[#140526] transition-transform duration-200 group-hover:scale-[1.02]"
-                      />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/20 to-black/40 pointer-events-none" />
-                      <span className="absolute top-2.5 right-2.5 bg-[#2b124c]/95 text-[#e7cb82] border border-[#c9a452] text-[10px] font-black px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-md">
-                        <Volume2 className="w-3.5 h-3.5" />
-                        <span>{activeConvEvidence.badge} · محادثة واتساب ودليل صوتي بالداخل</span>
-                      </span>
-                      <span className="absolute top-2.5 left-2.5 gold-metallic-card text-[10px] font-black px-3 py-1 rounded-lg flex items-center gap-1 shadow-md">
-                        <Maximize2 className="w-3.5 h-3.5" />
-                        <span>تكبير كامل · اضغط لفتح محادثة الواتساب</span>
-                      </span>
-                      <div className="absolute bottom-3 inset-x-3 bg-[#2b124c]/95 border-2 border-[#e7cb82] rounded-xl px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 shadow-lg">
-                        <div className="flex items-center gap-2 text-xs font-black text-[#fff2c6]">
-                          <Play className="w-4 h-4 text-[#e7cb82] fill-current shrink-0" />
-                          <span>
-                            اضغط على الشاشة لفتح محادثة الواتساب — لترى المحادثة افتح الشاشة (تكبير كامل)
-                          </span>
-                        </div>
-                        <span className="text-[10px] font-extrabold text-[#e7cb82] bg-black/50 px-2.5 py-0.5 rounded-md border border-[#c9a452]">
-                          تبديل الدليل ({(execVisualIdx % fieldVideos.length) + 1}/{fieldVideos.length})
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="p-3 bg-[#1f0b38] text-white flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-xs font-black text-[#f3dfa6] truncate">
-                        {activeConvEvidence.title}
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setExecVisualIdx((i) => (i + 1) % Math.max(1, fieldVideos.length))
-                          }
-                          className="px-3 py-1.5 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#e7cb82] text-[#f3dfa6] text-[11px] font-black flex items-center gap-1 cursor-pointer"
-                        >
-                          <RefreshCw className="w-3 h-3 text-[#e7cb82]" />
-                          <span>استعراض محادثة الواتساب التالية</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            stopAllAudio();
-                            setIsOpeningAutoMuted(false);
-                            setIsModalFullscreen(true);
-                            setModalFitMode('contain');
-                            setModalZoomScale(100);
-                            setActiveModalVideo({
-                              ...activeConvEvidence,
-                              hasAudio: true,
-                            });
-                          }}
-                          className="gold-metallic-card px-3.5 py-1.5 rounded-xl text-[11px] font-black flex items-center gap-1 cursor-pointer"
-                        >
-                          <Maximize2 className="w-3 h-3" />
-                          <span>فتح محادثة الواتساب (تكبير كامل)</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {showStudioControls && (
-                      <div className="p-3 bg-[#1f0b38] text-white flex flex-wrap items-center justify-between gap-1.5">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExecVisualIdx((i) => (i + 1) % Math.max(1, studioMediaCatalog.length))
-                            }
-                            className="gold-metallic-card px-3 py-1.5 rounded-xl text-[10px] font-black flex items-center gap-1 cursor-pointer"
-                          >
-                            <RefreshCw className="w-3 h-3" />
-                            <span>تغيير / تبديل الفيديو</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExecWidthMode((w) =>
-                                w === 'normal' ? 'wide' : w === 'wide' ? 'full' : 'normal'
-                              )
-                            }
-                            className="px-2.5 py-1.5 rounded-xl bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold cursor-pointer"
-                          >
-                            عرض الشاشة:{' '}
-                            {execWidthMode === 'normal'
-                              ? 'عادي'
-                              : execWidthMode === 'wide'
-                              ? 'عريض'
-                              : 'كامل الشاشة'}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExecHeightMode((h) =>
-                                h === 'sm' ? 'md' : h === 'md' ? 'lg' : h === 'lg' ? 'xl' : 'sm'
-                              )
-                            }
-                            className="px-2.5 py-1.5 rounded-xl bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold cursor-pointer"
-                          >
-                            الارتفاع:{' '}
-                            {execHeightMode === 'sm'
-                              ? 'صغير'
-                              : execHeightMode === 'md'
-                              ? 'وسط'
-                              : execHeightMode === 'lg'
-                              ? 'كبير'
-                              : 'عملاق'}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setExecScale((s) => Math.min(200, s + 15))}
-                            className="px-2 py-1.5 rounded-xl bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                          >
-                            <ZoomIn className="w-3 h-3 text-[#e7cb82]" />
-                            <span>+</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setExecScale((s) => Math.max(60, s - 15))}
-                            className="px-2 py-1.5 rounded-xl bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                          >
-                            <ZoomOut className="w-3 h-3 text-[#e7cb82]" />
-                            <span>-</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExecFitMode((f) => (f === 'cover' ? 'contain' : 'cover'))
-                            }
-                            className="px-2.5 py-1.5 rounded-xl bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold cursor-pointer"
-                          >
-                            {execFitMode === 'contain' ? 'ملء الإطار' : 'احتواء كامل'}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setExecPosY((y) => Math.max(0, y - 12))}
-                            className="px-2 py-1.5 rounded-xl bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                          >
-                            <ArrowUp className="w-3 h-3 text-[#e7cb82]" />
-                            <span>فوق</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setExecPosY((y) => Math.min(100, y + 12))}
-                            className="px-2 py-1.5 rounded-xl bg-[#2b124c] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
-                          >
-                            <ArrowDown className="w-3 h-3 text-[#e7cb82]" />
-                            <span>تحت</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* THE 4 VERBATIM SYNCHRONIZED PILLARS OF THE RECORDING */}
               <div className="mt-6 space-y-5">
                 {EXECUTIVE_APPEAL_PILLARS.map((pillar) => {
                   const isPillarActive =
@@ -4719,13 +4952,13 @@ export default function App() {
                     <div
                       key={pillar.id}
                       id={`exec-${pillar.id}`}
-                      className={`rounded-2xl border-2 p-5 sm:p-6 transition-all ${
+                      className={`rounded-2xl border p-5 sm:p-6 transition-colors bg-[#1f0b38]/85 text-white ${
                         isPillarActive
-                          ? 'bg-[#230d40] text-white border-[#e7cb82] shadow-2xl ring-2 ring-[#e7cb82]/50'
-                          : 'bg-[#f3ede0] text-[#23113d] border-[#c9a452]'
+                          ? 'border-[#e7cb82] shadow-lg'
+                          : 'border-[#c9a452]/75'
                       }`}
                     >
-                      <div className="flex flex-wrap items-start justify-between gap-3 pb-4 border-b border-[#c9a452]/40">
+                      <div className="flex flex-wrap items-start justify-between gap-3 pb-4 border-b border-[#c9a452]/35">
                         <div className="flex items-start gap-3">
                           <div
                             className={`w-10 h-10 rounded-xl font-black text-sm flex items-center justify-center shrink-0 tabular-nums ${
@@ -4737,25 +4970,13 @@ export default function App() {
                             {pillar.numberLabel}
                           </div>
                           <div>
-                            <span
-                              className={`text-[11px] font-extrabold block ${
-                                isPillarActive ? 'text-[#e7cb82]' : 'text-[#9c7625]'
-                              }`}
-                            >
+                            <span className="text-[11px] font-extrabold block text-[#e7cb82]">
                               {pillar.badge}
                             </span>
-                            <h4
-                              className={`text-base sm:text-lg font-black mt-0.5 ${
-                                isPillarActive ? 'text-white' : 'text-[#2b124c]'
-                              }`}
-                            >
+                            <h4 className="text-base sm:text-lg font-black mt-0.5 text-[#f3dfa6]">
                               {pillar.title}
                             </h4>
-                            <p
-                              className={`text-xs mt-0.5 ${
-                                isPillarActive ? 'text-[#e8dff5]' : 'text-[#4a3963]'
-                              }`}
-                            >
+                            <p className="text-xs mt-0.5 text-[#e8dff5]">
                               {pillar.subtitle}
                             </p>
                           </div>
@@ -4772,557 +4993,72 @@ export default function App() {
                                 false
                               )
                             }
-                            className={`px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer transition-all ${
+                            className={`px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer transition-colors ${
                               isSinglePillarPlaying || isPillarActive
                                 ? 'gold-metallic-card shadow-md'
                                 : 'bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452]'
                             }`}
                           >
-                            {isSinglePillarPlaying ? (
-                              <>
-                                <Pause className="w-3.5 h-3.5 fill-current" />
-                                <span>إيقاف المحور</span>
-                              </>
-                            ) : (
-                              <>
-                                <Volume2 className="w-3.5 h-3.5" />
-                                <span>استماع لهذا المحور ({pillar.timeRange})</span>
-                              </>
-                            )}
+                            <Volume2 className="w-3.5 h-3.5" />
+                            <span>استماع لهذا المحور ({pillar.timeRange})</span>
                           </button>
                         </div>
                       </div>
 
-                      {/* Verbatim Sentences List — Each Sentence Highlights Live Word-by-Word at its Exact Timestamp */}
                       <div className="mt-4 space-y-2.5">
-                        {pillar.sentences.map((sent) => {
-                          const isSentenceSpeaking =
-                            execAppealTime >= sent.start && execAppealTime < sent.end;
-                          const isSentencePassed = execAppealTime >= sent.end;
+                        {pillar.sentences
+                          .filter((sent) => sent.text.trim().length > 0)
+                          .map((sent) => {
+                            const isSentenceSpeaking =
+                              isExecAppealPlaying &&
+                              execAppealTime >= sent.start &&
+                              execAppealTime < sent.end;
 
-                          return (
-                            <div
-                              key={sent.id}
-                              id={`exec-sentence-${sent.id}`}
-                              onClick={() =>
-                                playExecutiveAppeal(
-                                  sent.start,
-                                  null,
-                                  'exec-appeal-full',
-                                  false
-                                )
-                              }
-                              title="اضغط للاستماع مباشرة من هذه الجملة في التسجيل الصوتي"
-                              className={`rounded-xl p-3.5 transition-all cursor-pointer border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
-                                isSentenceSpeaking
-                                  ? 'gold-metallic-card border-[#fff2c6] shadow-lg scale-[1.01]'
-                                  : isPillarActive
-                                  ? isSentencePassed
-                                    ? 'bg-[#19082e]/90 border-[#c9a452]/50 text-[#e8dff5]'
-                                    : 'bg-[#160629]/75 border-[#c9a452]/30 text-white hover:border-[#e7cb82]'
-                                  : 'bg-[#fffdf9] border-[#d8c59e] text-[#23113d] hover:border-[#2b124c]'
-                              }`}
-                            >
-                              <div className="flex items-start gap-2.5">
-                                <Volume2
-                                  className={`w-4 h-4 shrink-0 mt-1 ${
-                                    isSentenceSpeaking
-                                      ? 'text-[#1e0b36] animate-bounce'
-                                      : isPillarActive
-                                      ? 'text-[#e7cb82]'
-                                      : 'text-[#8c671d]'
-                                  }`}
-                                />
-                                <p
-                                  className={`text-xs sm:text-sm leading-[1.9] ${
-                                    isSentenceSpeaking
-                                      ? 'font-black text-[#1e0b36]'
-                                      : sent.isHeader
-                                      ? 'font-black'
-                                      : 'font-semibold'
-                                  }`}
-                                >
-                                  {renderGradualSyncedWords(
-                                    sent.text,
+                            return (
+                              <div
+                                key={sent.id}
+                                id={`exec-sentence-${sent.id}`}
+                                onClick={() =>
+                                  playExecutiveAppeal(
                                     sent.start,
-                                    sent.end,
-                                    execAppealTime,
-                                    isSentenceSpeaking,
-                                    !isSentenceSpeaking && isPillarActive
-                                  )}
-                                </p>
-                              </div>
-
-                              <span
-                                className={`font-mono text-[10px] font-bold px-2.5 py-1 rounded-md shrink-0 self-end sm:self-center tabular-nums ${
+                                    null,
+                                    'exec-appeal-full',
+                                    false
+                                  )
+                                }
+                                className={`rounded-xl p-3.5 transition-colors cursor-pointer border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
                                   isSentenceSpeaking
-                                    ? 'bg-[#2b124c] text-[#e7cb82]'
-                                    : isPillarActive
-                                    ? 'bg-black/40 text-[#e7cb82] border border-[#c9a452]/40'
-                                    : 'bg-[#f3ede0] text-[#2b124c] border border-[#c9a452]/50'
+                                    ? 'bg-[#2b124c] border-[#e7cb82] text-[#fff2c6] shadow-md'
+                                    : 'bg-[#1a0833]/55 border-[#c9a452]/35 text-[#f8f3e6] hover:border-[#c9a452]'
                                 }`}
                               >
-                                {sent.timeLabel}
-                              </span>
-                            </div>
-                          );
-                        })}
+                                <div className="flex items-start gap-2.5">
+                                  <Volume2 className="w-4 h-4 shrink-0 mt-1 text-[#e7cb82]" />
+                                  <p
+                                    className={`text-xs sm:text-sm leading-[1.9] ${
+                                      sent.isHeader ? 'font-black' : 'font-semibold'
+                                    }`}
+                                  >
+                                    {sent.text}
+                                  </p>
+                                </div>
+
+                                <span className="font-mono text-[10px] font-bold px-2.5 py-1 rounded-md shrink-0 self-end sm:self-center tabular-nums bg-black/35 text-[#e7cb82] border border-[#c9a452]/40">
+                                  {sent.timeLabel}
+                                </span>
+                              </div>
+                            );
+                          })}
                       </div>
                     </div>
                   );
                 })}
               </div>
-            </section>
 
-            {/* SECTION 01 */}
-            <article
-              id="section-01"
-              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-all p-6 sm:p-8 ${
-                activeAudioId === 'section1'
-                  ? 'border-[#2b124c] ring-4 ring-[#c9a452]/40'
-                  : 'border-[#c9a452]'
-              }`}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
-                    01
-                  </div>
-                  <div>
-                    <span className="text-[#9c7625] text-xs font-extrabold block">
-                      الوقائع التعاقدية والتزام المشتري في مسار رؤية عُمان 2040
-                    </span>
-                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                      حكاية العميل الوطني: من صلالة إلى خط التصدير غير النفطي
-                    </h3>
-                  </div>
-                </div>
-                {renderSectionAudioButton('section1', 'استماع للشريحة')}
-              </div>
-
-              <p className="text-[#3b2954] text-xs sm:text-sm leading-[1.95] mt-5">
-                في شهر مايو من عام 2026م، واجه المستثمر الوطني{' '}
-                <strong className="text-[#2b124c] font-extrabold">
-                  (شركة بن كليلة العامري للتجارة والاستثمار)
-                </strong>{' '}
-                واقعة إغلاق أكبر مستودع لتجارة الأعلاف في صلالة. لم يكن ذلك مدعاة للتراجع، بل شكّل
-                انطلاقة وطنية مسؤولة تواكب مستهدفات التنويع الاقتصادي ورؤية عُمان 2040؛ حيث توجه
-                العميل الوطني فوراً إلى العاصمة مسقط متقدماً لشركة المطاحن العمانية (ش.م.ع.ع) بصفقة
-                تصدير إماراتية كبرى بقيمة سنوية تناهز{' '}
-                <span className="gold-metallic-card font-black px-2.5 py-0.5 rounded mx-0.5 tabular-nums">
-                  1,870,000 ريال عماني
-                </span>{' '}
-                لصالح العميل النهائي: إحدى كبرى منشآت الإنتاج الحيواني بدولة الإمارات العربية المتحدة{' '}
-                <strong className="text-[#2b124c] font-extrabold">
-                  (مزرعة بركة الوقن - العين)
-                </strong>
-                .
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
-                <div className="rounded-2xl overflow-hidden border-2 border-[#c9a452] shadow-md">
-                  <div className="gold-metallic-ribbon px-4 py-2 flex items-center justify-between">
-                    <span className="text-xs font-black">التزام العميل الوطني المالي والتشغيلي</span>
-                    <CheckCircle2 className="w-4 h-4 text-[#2b124c]" />
-                  </div>
-                  <div className="bg-[#2b124c] text-white p-5">
-                    <h4 className="text-[#e7cb82] font-black text-base sm:text-lg tabular-nums">
-                      100% سداد نقدي مسبق (18,640 ر.ع)
-                    </h4>
-                    <p className="text-[#e8dff5] text-xs leading-relaxed mt-2">
-                      تعهّد بتحويل فوري ومنتظم لصالح مزرعة بركة الوقن (بواقع 16 تريلا لكل دورة دواجن / 40 يوماً)، مع
-                      إتمام الدفع المسبق لكل شحنة، وتأكيد التنفيذ الفعلي دون أي تمويل ائتماني أو
-                      تأجيل سداد.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl overflow-hidden border-2 border-[#c9a452] shadow-md">
-                  <div className="gold-metallic-ribbon px-4 py-2 flex items-center justify-between">
-                    <span className="text-xs font-black">الموقف الإداري لشركة المطاحن العمانية</span>
-                    <AlertTriangle className="w-4 h-4 text-[#2b124c]" />
-                  </div>
-                  <div className="bg-[#381960] text-white p-5">
-                    <h4 className="text-[#f3dfa6] font-black text-base sm:text-lg">
-                      خذلان وتهميش إداري متعمد (5 أشهر و18 يوماً)
-                    </h4>
-                    <p className="text-[#e8dff5] text-xs leading-relaxed mt-2">
-                      تأخير متكرر في أذونات التحميل لساعات وأيام رغم الجاهزية النقدية الكاملة، وصد
-                      الأبواب أمام الحلول البديلة، وتغييب مسؤولي التعاقد عمداً دون غطاء نظامي.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-5 p-4 rounded-2xl gold-metallic-card text-xs font-bold leading-relaxed">
-                <strong className="font-black text-[#1e0b36]">
-                  جوهر القضية أمام الفاضل خالد المسروري:{' '}
-                </strong>
-                لم تكن شركة بن كليلة العامري للتجارة والاستثمار طالبة لتسهيلات ائتمانية أو مهلة
-                آجلة، بل جاءت بصفقة مليونية نقدية فورية تدعم الصادرات العُمانية غير النفطية في مسار
-                رؤية عُمان 2040، لتُقابل ببرود إداري وافتعال عراقيل مستندية غير مبررة.
-              </div>
-
-              {renderRecordingVerbatimBox('section1')}
-            </article>
-
-            {/* SECTION 02 */}
-            <article
-              id="section-02"
-              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-all p-6 sm:p-8 ${
-                activeAudioId === 'section2'
-                  ? 'border-[#e7cb82] ring-4 ring-[#c9a452]/40'
-                  : 'border-[#c9a452]'
-              }`}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
-                    02
-                  </div>
-                  <div>
-                    <span className="text-[#9c7625] text-xs font-extrabold block">
-                      المطابقة الفنية والمختبرية (ISO 17025)
-                    </span>
-                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                      التدقيق الفني: التناقض المستندي الإداري المتعمد
-                    </h3>
-                  </div>
-                </div>
-                {renderSectionAudioButton('section2', 'استماع للشريحة')}
-              </div>
-
-              <p className="text-[#3b2954] text-xs sm:text-sm leading-[1.95] mt-5">
-                تكشف السجلات الرسمية عن فخ إجرائي وفني نُصب للمستثمر الوطني عبر تسليمه وثائق متضاربة
-                ومتناقضة صادرة عن ذات الجهة (شركة المطاحن العمانية)، مما ترتب عليه إغلاق تسجيل المنتج
-                في النظام الرقمي الإماراتي التابع لوزارة التغير المناخي والبيئة (MOCCAE) تحت الطلب
-                المقيد برقم:{' '}
-                <span className="bg-[#2b124c] border border-[#c9a452] text-[#e7cb82] font-mono text-xs font-bold px-2.5 py-0.5 rounded tabular-nums">
-                  (APH-12052026-3382929)
-                </span>
-                .
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
-                <div className="royal-node-card rounded-2xl p-5 text-white">
-                  <div className="flex items-center gap-2 text-[#e7cb82] font-black text-xs sm:text-sm">
-                    <AlertCircle className="w-4 h-4 text-[#e7cb82] shrink-0" />
-                    <span>شهادة التحليل المخبري (COA) - 23 يونيو 2026</span>
-                  </div>
-                  <p className="text-[#e8dff5] text-xs leading-relaxed mt-2.5">
-                    صادرة عن دائرة الجودة بمصنع المطاحن، وتثبت صراحة في نتائجها أن المنتج{' '}
-                    <strong className="font-black text-[#f3dfa6] underline">
-                      خالٍ تماماً من مضادات الكوكسيديا (Anticoccidials)
-                    </strong>{' '}
-                    بنسبة صفرية (0%). هذه الشهادة موقعة ومختومة رسمياً.
-                  </p>
-                </div>
-
-                <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-5">
-                  <div className="flex items-center gap-2 text-[#2b124c] font-black text-xs sm:text-sm">
-                    <FileText className="w-4 h-4 text-[#9c7625] shrink-0" />
-                    <span>البطاقة التعريفية (Label) المطبوعة على الكيس</span>
-                  </div>
-                  <p className="text-[#3b2954] text-xs leading-relaxed mt-2.5">
-                    تُدرج صراحة في جدول المكونات الدوائية وجود برنامج تدوير لمضادات الكوكسيديا{' '}
-                    <strong className="font-black text-[#2b124c]">
-                      (Anticoccidial Rotation Program)
-                    </strong>
-                    ، في تعارض وتناقض صارخ وتام مع الشهادة المخبرية المعتمدة!
-                  </p>
-                </div>
-              </div>
-
-              <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-4 mt-4">
-                <div className="flex items-center gap-1.5 text-[#2b124c] font-black text-xs mb-1.5">
-                  <FileText className="w-4 h-4 text-[#9c7625]" />
-                  <span>الأثر الإجرائي القاطع واشتراطات MOCCAE الإماراتية</span>
-                </div>
-                <p className="text-[#3b2954] text-xs leading-relaxed">
-                  بموجب اشتراطات الرقابة بدولة الإمارات، يُلزم إرفاق شهادة تحليل مخبري (COA) من مختبر
-                  معتمد (ISO 17025) لإثبات تطابق المكونات مع الملصق التعريفي. هذا التناقض الفني الصادر
-                  من المطاحن جعل الملف يُرفض آلياً، وعند مطالبة مسؤول التصدير بتصحيح البطاقة لتتطابق
-                  مع الشهادة، جاء الرد الرسمي المسجل باستهتار:{' '}
-                  <strong className="font-black text-[#e7cb82]">
-                    «هذا يحتاج طباعة من جديد ومكلف!»
-                  </strong>{' '}
-                  يضاف إلى ذلك تقييد صلاحية المنتج بـ 3 أشهر فقط على الملصق رغم التعاقد على جدول
-                  توريد ممتد لمئة أسبوع.
-                </p>
-              </div>
-
-              {renderRecordingVerbatimBox('section2')}
-            </article>
-
-            {/* SECTION 03 */}
-            <article
-              id="section-03"
-              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-all p-6 sm:p-8 ${
-                activeAudioId === 'section3'
-                  ? 'border-[#e7cb82] ring-4 ring-[#c9a452]/40'
-                  : 'border-[#c9a452]'
-              }`}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
-                    03
-                  </div>
-                  <div>
-                    <span className="text-[#9c7625] text-xs font-extrabold block">
-                      سلاسل الإمداد والحوكمة
-                    </span>
-                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                      التدخل التجاري الخارجي (المدعو نوفل): محاولة إقصاء المستثمر الوطني
-                    </h3>
-                  </div>
-                </div>
-                {renderSectionAudioButton('section3', 'استماع للشريحة')}
-              </div>
-
-              <p className="text-[#3b2954] text-xs sm:text-sm leading-[1.95] mt-5">
-                تُثبت الوقائع المادية أن عرقلة وحجب الأوراق البيطرية كانت تهدف إلى إحراق الوقت
-                واستنفاد مخزون الأعلاف لدى العميل النهائي{' '}
-                <strong className="text-[#2b124c] font-extrabold">
-                  (مزرعة بركة الوقن التي تضم 160 ألف طير)
-                </strong>{' '}
-                لدفع مسار التصدير قسراً نحو وسيط تجاري خارجي{' '}
-                <strong className="text-[#2b124c] font-extrabold">
-                  (المدعو نوفل / أطياف جلوبال للتجارة FZC - المسجلة بمنطقة حرة بعجمان)
-                </strong>
-                ؛ هذا الطرف تحوّل إلى أداة ضغط وإقصاء للمستثمر الوطني عبر مسارين موثقين:
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
-                <div className="royal-node-card rounded-2xl p-5 text-white">
-                  <div className="w-7 h-7 rounded-lg gold-metallic-card font-black text-xs flex items-center justify-center mb-3 tabular-nums">
-                    1
-                  </div>
-                  <h4 className="text-[#e7cb82] font-black text-sm">
-                    فرض الوسيط الخارجي (نوفل) والعمولات القسرية
-                  </h4>
-                  <p className="text-[#e8dff5] text-xs leading-relaxed mt-2">
-                    تعمد حجب الأوراق البيطرية وشهادات المطابقة لوضع المزرعة أمام خطر نفاد العلف عن
-                    160 ألف طير، ومحاولة فرض الوسيط <strong className="text-white">(نوفل)</strong>{' '}
-                    بعمولة إضافية قدرها 50 ريالاً عمانياً عن كل شحنة دون أي سند تعاقدي أو قيمة مضافة،
-                    مع تمسك إدارة المزرعة بعقدها المباشر مع{' '}
-                    <strong className="text-[#f3dfa6]">
-                      شركة بن كليلة العامري للتجارة والاستثمار
-                    </strong>
-                    .
-                  </p>
-                </div>
-
-                <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-5">
-                  <div className="w-7 h-7 rounded-lg bg-[#2b124c] text-[#e7cb82] font-black text-xs flex items-center justify-center mb-3 tabular-nums">
-                    2
-                  </div>
-                  <h4 className="text-[#2b124c] font-black text-sm">
-                    احتجاز الشاحنات 4 أيام رغم استلام دفعة النقل (700 ر.ع)
-                  </h4>
-                  <p className="text-[#3b2954] text-xs leading-relaxed mt-2">
-                    في واقعة موثقة، تسلّم الوسيط <strong className="text-[#2b124c]">(نوفل)</strong>{' '}
-                    مبلغ 700 ريال عماني كدفعة مقدمة للنقل، ومع ذلك تم احتجاز الشاحنات المحملة لمدة
-                    أربعة أيام متتالية مع إغلاق الهواتف وتجاهل اتصالات الشركة، مما كشف تناقض المصنع
-                    حين سمح للوسيط بالتحميل الفوري من البوابات بينما كان يعتذر للشركة العمانية بعدم
-                    توفر الأكياس أو المواد الخام.
-                  </p>
-                </div>
-              </div>
-
-              {renderRecordingVerbatimBox('section3')}
-            </article>
-
-            {/* SECTION 04 */}
-            <article
-              id="section-04"
-              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-all p-6 sm:p-8 ${
-                activeAudioId === 'section4'
-                  ? 'border-[#e7cb82] ring-4 ring-[#c9a452]/40'
-                  : 'border-[#c9a452]'
-              }`}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
-                    04
-                  </div>
-                  <div>
-                    <span className="text-[#9c7625] text-xs font-extrabold block">
-                      المساءلة والرقابة الحكومية | ملف المراجع: الفاضل خالد المسروري
-                    </span>
-                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                      الأسئلة الحاسمة: نداء إلى مركز حماية المنافسة ومنع الاحتكار
-                    </h3>
-                  </div>
-                </div>
-                {renderSectionAudioButton('section4', 'استماع للشريحة')}
-              </div>
-
-              <p className="text-[#4a3963] text-xs mt-4 font-semibold">
-                نضع أمام جهات الاختصاص والرقابة المؤسسية وعلى رأسها الفاضل خالد المسروري المحترم
-                (مدير عام مركز حماية المنافسة ومنع الاحتكار) ستة تساؤلات جوهرية لفتح تحقيق شفاف
-                وعاجل حول ممارسات شركة المطاحن العمانية:
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
-                {[
-                  {
-                    num: 1,
-                    title: 'التعامل مع العميل الوطني',
-                    desc: 'لماذا يتم تهميش وإقصاء المستثمر الوطني الذي يجلب عقود تصدير مليونية ويدفع نقداً بنسبة 100% مقدماً؟',
-                  },
-                  {
-                    num: 2,
-                    title: 'التضارب المستندي وإهدار العقد المليوني',
-                    desc: 'لماذا يُصدر المصنع شهادة تحليل مخبري (COA) تتناقض مع البطاقة التعريفية (Label) ثم يمتنع عن تصحيح الخطأ بحجة تكلفة الطباعة؟',
-                  },
-                  {
-                    num: 3,
-                    title: 'تمكين الوسيط الخارجي على حساب التاجر العماني',
-                    desc: 'لماذا تُحجب الأوراق البيطرية وتُعطل شحنات المستثمر العماني بينما يُمكّن الوسيط الخارجي (نوفل من أطياف جلوبال) من التحميل الفوري وفرض الإتاوات؟',
-                  },
-                  {
-                    num: 4,
-                    title: 'التجاهل المؤسسي وإغلاق قنوات التواصل',
-                    desc: 'لماذا يتعمّد مسؤولو المبيعات والتصدير عدم الرد على عشرات المكالمات والرسائل الرسمية الموثقة رغم سداد كامل المبالغ؟',
-                  },
-                  {
-                    num: 5,
-                    title: 'الاختلاف الجوهري المانع للنفاذ الجمركي',
-                    desc: 'من يتحمل المسؤولية القانونية عن تعطيل تسجيل المنتج في نظام (MOCCAE) بسبب التناقض الفني في الوثائق الصادرة عن المصنع؟',
-                  },
-                  {
-                    num: 6,
-                    title: 'احتجاز الشاحنات والتحكم في مسارات التحميل',
-                    desc: 'بأي صفة قانونية يتحكم وسيط خارجي (نوفل) مسجل في منطقة حرة بأذونات التحميل ويحتجز الشاحنات 4 أيام بعد استلام دفعة النقل؟',
-                  },
-                ].map((q) => (
-                  <div
-                    key={q.num}
-                    className="bg-[#f3ede0] border border-[#c9a452] rounded-2xl p-4 flex items-start gap-3"
-                  >
-                    <div className="w-7 h-7 rounded-lg bg-[#2b124c] text-[#e7cb82] border border-[#c9a452] font-black text-xs flex items-center justify-center shrink-0 mt-0.5 tabular-nums">
-                      {q.num}
-                    </div>
-                    <div>
-                      <h4 className="text-[#2b124c] font-extrabold text-xs sm:text-sm">
-                        {q.title}
-                      </h4>
-                      <p className="text-[#4a3963] text-[11px] sm:text-xs leading-relaxed mt-1">
-                        {q.desc}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {renderRecordingVerbatimBox('section4')}
-            </article>
-
-            {/* SECTION 05 */}
-            <article
-              id="section-05"
-              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-all p-6 sm:p-8 ${
-                activeAudioId === 'section5'
-                  ? 'border-[#e7cb82] ring-4 ring-[#c9a452]/40'
-                  : 'border-[#c9a452]'
-              }`}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
-                    05
-                  </div>
-                  <div>
-                    <span className="text-[#9c7625] text-xs font-extrabold block">
-                      التكييف القانوني والتشريعي
-                    </span>
-                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                      السند القانوني الصارم: دحض ذريعة «لم نرفض البيع»
-                    </h3>
-                  </div>
-                </div>
-                {renderSectionAudioButton('section5', 'استماع للشريحة')}
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
-                <div className="royal-node-card rounded-2xl p-5 text-white">
-                  <span className="text-[#e7cb82] text-xs font-extrabold block">
-                    المرسوم السلطاني رقم 67/2014
-                  </span>
-                  <h4 className="text-white font-black text-sm sm:text-base mt-1">
-                    قانون حماية المنافسة ومنع الاحتكار (المادتان 9 و10)
-                  </h4>
-                  <p className="text-[#e8dff5] text-xs leading-relaxed mt-3">
-                    تحظر المادتان قطعياً إساءة استغلال الوضع المهيمن، والتفرقة في المعاملة بين
-                    المتعاملين في العقود المتكافئة، والامتناع عن التعامل دون مسوغ قانوني. إن استلام
-                    المقابل المالي كاملاً (18,640 ر.ع) مسبقاً ثم تعمد تعطيل التسليم وتسليم وثائق فنية
-                    متناقضة تمنع النفاذ الجمركي يُعد{' '}
-                    <strong className="font-black text-[#f3dfa6]">
-                      امتناعاً تعسفياً ضمنياً مقنّعاً عن التعامل والتسليم.
-                    </strong>
-                  </p>
-                </div>
-
-                <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-5">
-                  <span className="text-[#9c7625] text-xs font-extrabold block">
-                    المرسوم السلطاني رقم 29/2013
-                  </span>
-                  <h4 className="text-[#2b124c] font-black text-sm sm:text-base mt-1">
-                    قانون المعاملات المدنية (المادة 381 والمادتان 155 و156)
-                  </h4>
-                  <p className="text-[#3b2954] text-xs leading-relaxed mt-3">
-                    تلزم المادة (381) البائع بتسليم المبيع وملحقاته الضرورية للاستعمال المقصود؛ وفي
-                    عقود التصدير، تُعد الشهادات الفنية السليمة والمطابقة جزءاً لا يتجزأ من الالتزام
-                    بالتسليم. كما تقرر المادتان (155 و156) وجوب تنفيذ العقود بحسن نية، والمسؤولية
-                    التقصيرية والعقدية عن كل غش أو خطأ جسيم يلحق الضرر بالمتعاقد الآخر.
-                  </p>
-                </div>
-              </div>
-
-              {renderRecordingVerbatimBox('section5')}
-            </article>
-
-            {/* SECTION 06 */}
-            <article
-              id="section-06"
-              className={`bg-[#faf7f0] rounded-3xl shadow-md border-2 transition-all p-6 sm:p-8 ${
-                activeAudioId === 'section6'
-                  ? 'border-[#e7cb82] ring-4 ring-[#c9a452]/40'
-                  : 'border-[#c9a452]'
-              }`}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[#dccaa3]">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] font-black text-base flex items-center justify-center shrink-0 tabular-nums">
-                    06
-                  </div>
-                  <div>
-                    <span className="text-[#9c7625] text-xs font-extrabold block">
-                      الخاتمة والنداء المؤسسي
-                    </span>
-                    <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                      الختام: نداء وطني لتمكين الصادرات غير النفطية في مسار رؤية عُمان 2040
-                    </h3>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      playExecutiveAppeal(0, null, 'exec-appeal-full', true)
-                    }
-                    className="no-print gold-metallic-card px-4 py-2 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-sm"
-                  >
-                    <Volume2 className="w-3.5 h-3.5 text-[#2b124c]" />
-                    <span>تشغيل تسجيل الخلاصة التنفيذية والنداء الختامي (03:46)</span>
-                  </button>
-                  {renderSectionAudioButton('section6', 'استماع للنداء الختامي')}
-                </div>
-              </div>
-
-              <div className="mt-6 royal-purple-box rounded-3xl p-7 sm:p-10 text-center shadow-2xl">
+              <div
+                id="section-06"
+                className="mt-6 royal-purple-box rounded-3xl p-7 sm:p-10 text-center shadow-2xl"
+              >
                 <div className="w-20 h-20 mx-auto mb-4 rounded-full p-1 bg-gradient-to-b from-[#fff2c6] via-[#c9a452] to-[#8f6718] shadow-lg">
                   <img
                     src={CORPORATE_SEAL_LOGO}
@@ -5350,249 +5086,6 @@ export default function App() {
               </div>
 
               {renderRecordingVerbatimBox('section6')}
-            </article>
-
-            {/* 4.B OFFICIAL CONVERSATION EVIDENCE VIDEOS (1 TO 7) WITH CLEAR AUDIO, SEQUENTIAL AUTO-PLAY & FULLSCREEN ZOOM */}
-            <section
-              id="section-conversation-evidence"
-              className="bg-[#faf7f0] rounded-3xl shadow-md border-2 border-[#c9a452] p-6 sm:p-8 no-print"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-[#dccaa3]">
-                <div>
-                  <span className="text-[#9c7625] text-xs font-extrabold block">
-                    قسم دلائل المحادثات الرسمية بالصوت والصورة | شركة بن كليلة العامري للتجارة والاستثمار
-                  </span>
-                  <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                    دلائل المحادثات الموثقة بالصوت والصورة (بالترتيب من الدليل 1 إلى الدليل 7)
-                  </h3>
-                  <p className="text-[#4a3963] text-xs mt-1">
-                    جميع فيديوهات دلائل المحادثات معروضة بوضوح بالترتيب وتعمل بالصوت الكامل الواضح تلقائياً واحداً تلو الآخر مع إمكانية تكبير الشاشة الكاملة لأي دليل
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const firstVid = fieldVideos[0];
-                      if (!firstVid) return;
-                      stopAllAudio();
-                      const firstEl = evidenceVideoRefs.current[firstVid.id];
-                      if (firstEl) {
-                        firstEl.muted = false;
-                        firstEl.currentTime = 0;
-                        firstEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        firstEl.play().catch(() => {});
-                      }
-                    }}
-                    className="gold-metallic-card px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
-                  >
-                    <Volume2 className="w-4 h-4 text-[#2b124c]" />
-                    <span>تشغيل دلائل المحادثات بالترتيب (1 ← 7)</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
-                {fieldVideos.map((vid, idx) => {
-                  const vidScale = typeof vid.scale === 'number' ? vid.scale : 100;
-                  const vidPosY = typeof vid.posY === 'number' ? vid.posY : 50;
-                  const isImageCard = vid.mediaType === 'image';
-                  const posterSrc =
-                    vid.posterUrl || `/assets/aistudio/poster-conv-${(idx % 7) + 1}.jpg`;
-
-                  return (
-                    <div
-                      key={vid.id}
-                      id={`evidence-card-${vid.id}`}
-                      className="rounded-2xl border-2 border-[#c9a452] bg-[#f3ede0] text-[#23113d] overflow-hidden flex flex-col justify-between shadow-md hover:shadow-xl transition-all"
-                    >
-                      <div>
-                        {/* Header Bar with Evidence Number Badge & Fullscreen WhatsApp Callout */}
-                        <div className="bg-[#2b124c] text-white px-4 py-2.5 flex items-center justify-between gap-2 border-b border-[#c9a452]">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="gold-metallic-card text-[11px] font-black px-2.5 py-0.5 rounded-lg shrink-0">
-                              دلائل المحادثات ({idx + 1})
-                            </span>
-                            <span className="text-[11px] font-bold text-[#e7cb82] truncate">
-                              {vid.badge || `دليل رسمي رقم (${idx + 1})`}
-                            </span>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              stopAllAudio();
-                              setIsOpeningAutoMuted(false);
-                              setIsModalFullscreen(true);
-                              setModalFitMode('contain');
-                              setModalZoomScale(100);
-                              setActiveModalVideo({
-                                ...vid,
-                                hasAudio: true,
-                              });
-                            }}
-                            className="gold-metallic-card text-[10px] font-black px-2.5 py-1 rounded-lg flex items-center gap-1 cursor-pointer shrink-0 shadow-sm"
-                          >
-                            <Maximize2 className="w-3 h-3" />
-                            <span>تكبير كامل · افتح المحادثة</span>
-                          </button>
-                        </div>
-
-                        {/* Prominent Top Notice Banner: Click to open WhatsApp Conversation */}
-                        <div
-                          onClick={() => {
-                            stopAllAudio();
-                            setIsOpeningAutoMuted(false);
-                            setIsModalFullscreen(true);
-                            setModalFitMode('contain');
-                            setModalZoomScale(100);
-                            setActiveModalVideo({
-                              ...vid,
-                              hasAudio: true,
-                            });
-                          }}
-                          className="bg-[#381960] hover:bg-[#49217a] text-[#fff2c6] px-3.5 py-2 border-b border-[#c9a452] flex items-center justify-between gap-2 cursor-pointer transition-colors"
-                        >
-                          <span className="text-[11px] font-black flex items-center gap-1.5">
-                            <Volume2 className="w-3.5 h-3.5 text-[#e7cb82] shrink-0" />
-                            <span>
-                              اضغط على الشاشة لفتح محادثة الواتساب — لترى المحادثة افتح الشاشة (تكبير كامل)
-                            </span>
-                          </span>
-                          <span className="text-[10px] font-extrabold text-[#e7cb82] bg-black/40 px-2 py-0.5 rounded border border-[#c9a452]/60 shrink-0">
-                            محادثة واتساب بالداخل
-                          </span>
-                        </div>
-
-                        {/* Clear Video Player with Interior WhatsApp Poster Frame Visible From Outside */}
-                        <div className="relative bg-[#140526] overflow-hidden">
-                          {isImageCard ? (
-                            <img
-                              src={vid.url}
-                              alt={vid.title}
-                              style={{
-                                objectPosition: `50% ${vidPosY}%`,
-                                transform: `scale(${vidScale / 100})`,
-                              }}
-                              className="w-full h-64 sm:h-72 object-contain bg-black"
-                            />
-                          ) : (
-                            <video
-                              ref={(el) => {
-                                evidenceVideoRefs.current[vid.id] = el;
-                              }}
-                              key={vid.url}
-                              src={vid.url}
-                              poster={posterSrc}
-                              controls
-                              playsInline
-                              preload="metadata"
-                              onPlay={(e) => {
-                                const currentVideo = e.currentTarget;
-                                currentVideo.muted = false;
-                                // Stop all background narration audio and other evidence videos so sound is 100% clear
-                                stopAllAudio();
-                                pauseAllEvidenceVideos(vid.id);
-                                setPlayingEvidenceId(vid.id);
-                                if (
-                                  openingHeroVideoRef.current &&
-                                  !openingHeroVideoRef.current.paused
-                                ) {
-                                  openingHeroVideoRef.current.pause();
-                                  setIsOpeningVideoPlayingHero(false);
-                                }
-                              }}
-                              onPause={() => {
-                                if (playingEvidenceId === vid.id) {
-                                  setPlayingEvidenceId(null);
-                                }
-                              }}
-                              onEnded={() => {
-                                setPlayingEvidenceId(null);
-                                // Automatically chain to the next Conversation Evidence video in order
-                                const nextVid = fieldVideos[idx + 1];
-                                if (nextVid) {
-                                  const nextEl = evidenceVideoRefs.current[nextVid.id];
-                                  if (nextEl) {
-                                    nextEl.muted = false;
-                                    nextEl.currentTime = 0;
-                                    nextEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                                    nextEl.play().catch(() => {});
-                                  }
-                                }
-                              }}
-                              className="w-full h-64 sm:h-80 object-contain bg-black"
-                            />
-                          )}
-                        </div>
-
-                        <div className="p-4">
-                          <div className="flex items-center justify-between gap-2 mb-1.5">
-                            <span className="inline-flex items-center gap-1 text-[10px] font-black text-[#2b124c] bg-[#e7cb82]/40 border border-[#c9a452] px-2 py-0.5 rounded-md">
-                              <Volume2 className="w-3 h-3 text-[#2b124c]" />
-                              <span>محادثة واتساب ودليل صوتي · {vid.durationLabel}</span>
-                            </span>
-                            <span className="text-[10px] font-mono font-bold text-[#7c5b14]">
-                              ترتيب الدليل: #{idx + 1} من {fieldVideos.length}
-                            </span>
-                          </div>
-                          <h4 className="font-black text-sm text-[#2b124c] leading-snug">
-                            {vid.title}
-                          </h4>
-                          <p className="text-xs text-[#4a3963] mt-1 leading-relaxed">
-                            {vid.subtitle}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="p-4 pt-0">
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const el = evidenceVideoRefs.current[vid.id];
-                              if (el) {
-                                if (el.paused) {
-                                  stopAllAudio();
-                                  pauseAllEvidenceVideos(vid.id);
-                                  el.muted = false;
-                                  el.play().catch(() => {});
-                                } else {
-                                  el.pause();
-                                }
-                              }
-                            }}
-                            className="flex-1 bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452] text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
-                          >
-                            <Volume2 className="w-3.5 h-3.5" />
-                            <span>تشغيل / إيقاف بالصوت الواضح</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              stopAllAudio();
-                              setIsOpeningAutoMuted(false);
-                              setIsModalFullscreen(true);
-                              setModalFitMode('contain');
-                              setModalZoomScale(100);
-                              setActiveModalVideo({
-                                ...vid,
-                                hasAudio: true,
-                              });
-                            }}
-                            className="flex-1 gold-metallic-card text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
-                          >
-                            <Maximize2 className="w-3.5 h-3.5" />
-                            <span>اضغط لفتح المحادثة (تكبير كامل)</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
             </section>
 
             {/* 5. APPROVED OFFICIAL EVIDENCE, DOCUMENTS, VIDEOS & PRESENTATIONS LIBRARY WITH UNRESTRICTED UPLOAD */}
@@ -5760,7 +5253,8 @@ export default function App() {
                   return (
                     <div
                       key={doc.id}
-                      className={`bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl overflow-hidden flex flex-col justify-between hover:shadow-lg transition-all ${
+                      style={{ animationDelay: `${Math.min(docIdx * 70, 350)}ms` }}
+                      className={`evidence-doc-fade-in bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl overflow-hidden flex flex-col justify-between hover:shadow-lg transition-all duration-500 ${
                         docWidth === 'full' || docHeight === 'xl'
                           ? 'sm:col-span-2 lg:col-span-3'
                           : docWidth === 'wide' || docHeight === 'lg'
@@ -6240,7 +5734,7 @@ export default function App() {
                   title="إدخال صوتي للسؤال"
                   className={`w-11 h-11 rounded-xl border-2 flex items-center justify-center transition-colors cursor-pointer shrink-0 ${
                     isListeningMic
-                      ? 'bg-red-50 border-red-400 text-red-600 animate-pulse'
+                      ? 'gold-metallic-card'
                       : 'bg-[#f3ede0] hover:bg-[#e6decb] border-[#c9a452] text-[#2b124c]'
                   }`}
                 >
@@ -6256,6 +5750,217 @@ export default function App() {
                   <Send className="w-3.5 h-3.5 rotate-180" />
                 </button>
               </form>
+            </section>
+
+            {/* BOTTOM SECTION ONLY: OFFICIAL WHATSAPP CONVERSATION EVIDENCE VIDEOS (1 TO 7) */}
+            <section
+              id="section-conversation-evidence"
+              className="bg-[#faf7f0] rounded-3xl shadow-md border-2 border-[#c9a452] p-6 sm:p-8 no-print"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-[#dccaa3]">
+                <div>
+                  <span className="text-[#9c7625] text-xs font-extrabold block">
+                    القسم السفلي المخصص لتوثيق المحادثات | شركة بن كليلة العامري للتجارة والاستثمار
+                  </span>
+                  <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
+                    دلائل محادثات الواتساب الموثقة بالصوت والصورة (من الدليل 1 إلى الدليل 7 — أسفل الصفحة)
+                  </h3>
+                  <p className="text-[#4a3963] text-xs mt-1">
+                    جميع فيديوهات دلائل المحادثات معروضة في القسم السفلي بالترتيب وتعمل بالصوت الواضح مع إمكانية تكبير الشاشة الكاملة
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const firstVid = fieldVideos[0];
+                      if (!firstVid) return;
+                      stopAllAudio();
+                      const firstEl = evidenceVideoRefs.current[firstVid.id];
+                      if (firstEl) {
+                        firstEl.muted = false;
+                        firstEl.currentTime = 0;
+                        firstEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        firstEl.play().catch(() => {});
+                      }
+                    }}
+                    className="gold-metallic-card px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  >
+                    <Volume2 className="w-4 h-4 text-[#2b124c]" />
+                    <span>تشغيل دلائل المحادثات بالترتيب (1 ← 7)</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
+                {fieldVideos.map((vid, idx) => {
+                  const vidScale = typeof vid.scale === 'number' ? vid.scale : 100;
+                  const vidPosY = typeof vid.posY === 'number' ? vid.posY : 50;
+                  const isImageCard = vid.mediaType === 'image';
+                  const posterSrc =
+                    vid.posterUrl || `/assets/aistudio/poster-conv-${(idx % 7) + 1}.jpg`;
+
+                  return (
+                    <div
+                      key={vid.id}
+                      id={`evidence-card-${vid.id}`}
+                      className="rounded-2xl border-2 border-[#c9a452] bg-[#f3ede0] text-[#23113d] overflow-hidden flex flex-col justify-between shadow-md"
+                    >
+                      <div>
+                        <div className="bg-[#2b124c] text-white px-4 py-2.5 flex items-center justify-between gap-2 border-b border-[#c9a452]">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="gold-metallic-card text-[11px] font-black px-2.5 py-0.5 rounded-lg shrink-0">
+                              دلائل المحادثات ({idx + 1})
+                            </span>
+                            <span className="text-[11px] font-bold text-[#e7cb82] truncate">
+                              {vid.badge || `دليل رسمي رقم (${idx + 1})`}
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              stopAllAudio();
+                              setIsOpeningAutoMuted(false);
+                              setIsModalFullscreen(true);
+                              setModalFitMode('contain');
+                              setModalZoomScale(100);
+                              setActiveModalVideo({
+                                ...vid,
+                                hasAudio: true,
+                              });
+                            }}
+                            className="gold-metallic-card text-[10px] font-black px-2.5 py-1 rounded-lg flex items-center gap-1 cursor-pointer shrink-0 shadow-sm"
+                          >
+                            <Maximize2 className="w-3 h-3" />
+                            <span>تكبير كامل</span>
+                          </button>
+                        </div>
+
+                        <div className="relative bg-[#140526] overflow-hidden">
+                          {isImageCard ? (
+                            <img
+                              src={vid.url}
+                              alt={vid.title}
+                              style={{
+                                objectPosition: `50% ${vidPosY}%`,
+                                transform: `scale(${vidScale / 100})`,
+                              }}
+                              className="w-full h-64 sm:h-72 object-contain bg-black"
+                            />
+                          ) : (
+                            <video
+                              ref={(el) => {
+                                evidenceVideoRefs.current[vid.id] = el;
+                              }}
+                              key={vid.url}
+                              src={vid.url}
+                              poster={posterSrc}
+                              controls
+                              playsInline
+                              preload="metadata"
+                              onPlay={(e) => {
+                                const currentVideo = e.currentTarget;
+                                currentVideo.muted = false;
+                                stopAllAudio();
+                                pauseAllEvidenceVideos(vid.id);
+                                setPlayingEvidenceId(vid.id);
+                                if (
+                                  openingHeroVideoRef.current &&
+                                  !openingHeroVideoRef.current.paused
+                                ) {
+                                  openingHeroVideoRef.current.pause();
+                                  setIsOpeningVideoPlayingHero(false);
+                                }
+                              }}
+                              onPause={() => {
+                                if (playingEvidenceId === vid.id) {
+                                  setPlayingEvidenceId(null);
+                                }
+                              }}
+                              onEnded={() => {
+                                setPlayingEvidenceId(null);
+                                const nextVid = fieldVideos[idx + 1];
+                                if (nextVid) {
+                                  const nextEl = evidenceVideoRefs.current[nextVid.id];
+                                  if (nextEl) {
+                                    nextEl.muted = false;
+                                    nextEl.currentTime = 0;
+                                    nextEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                    nextEl.play().catch(() => {});
+                                  }
+                                }
+                              }}
+                              className="w-full h-64 sm:h-80 object-contain bg-black"
+                            />
+                          )}
+                        </div>
+
+                        <div className="p-4">
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <span className="inline-flex items-center gap-1 text-[10px] font-black text-[#2b124c] bg-[#e7cb82]/40 border border-[#c9a452] px-2 py-0.5 rounded-md">
+                              <Volume2 className="w-3 h-3 text-[#2b124c]" />
+                              <span>دليل صوتي ومرئي · {vid.durationLabel}</span>
+                            </span>
+                            <span className="text-[10px] font-mono font-bold text-[#7c5b14]">
+                              ترتيب الدليل: #{idx + 1} من {fieldVideos.length}
+                            </span>
+                          </div>
+                          <h4 className="font-black text-sm text-[#2b124c] leading-snug">
+                            {vid.title}
+                          </h4>
+                          <p className="text-xs text-[#4a3963] mt-1 leading-relaxed">
+                            {vid.subtitle}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="p-4 pt-0">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const el = evidenceVideoRefs.current[vid.id];
+                              if (el) {
+                                if (el.paused) {
+                                  stopAllAudio();
+                                  pauseAllEvidenceVideos(vid.id);
+                                  el.muted = false;
+                                  el.play().catch(() => {});
+                                } else {
+                                  el.pause();
+                                }
+                              }
+                            }}
+                            className="flex-1 bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452] text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                          >
+                            <Volume2 className="w-3.5 h-3.5" />
+                            <span>تشغيل / إيقاف بالصوت الواضح</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              replacingVideoIdRef.current = vid.id;
+                              setReplacingVideoId(vid.id);
+                              setStudioPickerTarget({
+                                type: 'field-video',
+                                id: vid.id,
+                                title: `تغيير الفيديو / الصورة — ${vid.badge || `دلائل المحادثات (${idx + 1})`}`,
+                              });
+                            }}
+                            className="flex-1 gold-metallic-card text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                          >
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>تغيير الفيديو / الصورة</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </section>
           </main>
 
@@ -6524,7 +6229,9 @@ export default function App() {
               <span className="gold-metallic-card text-[10px] font-black px-2.5 py-1 rounded-lg shrink-0 flex items-center gap-1">
                 <Volume2 className="w-3 h-3 text-[#2b124c]" />
                 <span>
-                  {isExecAppealPlaying
+                  {isClarificationPlaying
+                    ? `الأسئلة الاستيضاحية (${formatTime(clarificationTime)} / ${formatTime(clarificationDuration)})`
+                    : isExecAppealPlaying
                     ? `الخلاصة التنفيذية (${formatTime(execAppealTime)} / ${formatTime(execAppealDuration)})`
                     : activeAudioId
                     ? `التسجيل الصوتي المتزامن (${formatTime(currentTime)} / ${formatTime(duration)})`
@@ -6540,26 +6247,45 @@ export default function App() {
               <button
                 type="button"
                 onClick={() =>
-                  playExecutiveAppeal(0, null, 'exec-appeal-full', false)
+                  playClarificationQuestions(0, null, 'clarification-full', false)
                 }
-                className={`px-3 py-1.5 rounded-xl text-[10px] font-black border cursor-pointer flex items-center gap-1 transition-all ${
-                  isExecAppealPlaying
+                className={`px-3 py-1.5 rounded-xl text-[10px] font-black border cursor-pointer flex items-center gap-1 transition-colors ${
+                  isClarificationPlaying
                     ? 'bg-white text-[#2b124c] border-[#e7cb82]'
                     : 'gold-metallic-card'
+                }`}
+              >
+                {isClarificationPlaying ? (
+                  <Pause className="w-3 h-3 fill-current" />
+                ) : (
+                  <Volume2 className="w-3 h-3 text-[#2b124c]" />
+                )}
+                <span>{isClarificationPlaying ? 'إيقاف الأسئلة' : 'الأسئلة (06:58)'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  playExecutiveAppeal(0, null, 'exec-appeal-full', false)
+                }
+                className={`px-3 py-1.5 rounded-xl text-[10px] font-black border cursor-pointer flex items-center gap-1 transition-colors ${
+                  isExecAppealPlaying
+                    ? 'bg-white text-[#2b124c] border-[#e7cb82]'
+                    : 'bg-[#2b124c] border-[#c9a452] text-[#f3dfa6]'
                 }`}
               >
                 {isExecAppealPlaying ? (
                   <Pause className="w-3 h-3 fill-current" />
                 ) : (
-                  <Volume2 className="w-3 h-3 text-[#2b124c]" />
+                  <Volume2 className="w-3 h-3 text-[#e7cb82]" />
                 )}
-                <span>{isExecAppealPlaying ? 'إيقاف الخلاصة' : 'تشغيل الخلاصة (03:46)'}</span>
+                <span>{isExecAppealPlaying ? 'إيقاف الخلاصة' : 'الخلاصة (03:46)'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setSmartAudioTransition((p) => !p)}
-                className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black border cursor-pointer flex items-center gap-1 transition-all ${
+                className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black border cursor-pointer flex items-center gap-1 transition-colors ${
                   smartAudioTransition
                     ? 'gold-metallic-card'
                     : 'bg-[#2b124c] border-[#c9a452] text-[#f3dfa6]'
@@ -6572,7 +6298,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsGradualAutoScroll((p) => !p)}
-                className={`px-3 py-1.5 rounded-xl text-[11px] font-black border cursor-pointer flex items-center gap-1.5 transition-all ${
+                className={`px-3 py-1.5 rounded-xl text-[11px] font-black border cursor-pointer flex items-center gap-1.5 transition-colors ${
                   isGradualAutoScroll
                     ? 'gold-metallic-card'
                     : 'bg-[#2b124c] hover:bg-[#3d1b6a] border-[#c9a452] text-[#f3dfa6]'
@@ -6618,7 +6344,9 @@ export default function App() {
               className="h-full bg-gradient-to-r from-[#c9a452] via-[#fff2c6] to-[#e7cb82] transition-all duration-300"
               style={{
                 width: `${
-                  isExecAppealPlaying
+                  isClarificationPlaying
+                    ? Math.min(100, Math.max(4, (clarificationTime / Math.max(1, clarificationDuration)) * 100))
+                    : isExecAppealPlaying
                     ? Math.min(100, Math.max(4, (execAppealTime / Math.max(1, execAppealDuration)) * 100))
                     : activeAudioId
                     ? Math.min(100, Math.max(4, (currentTime / Math.max(1, duration)) * 100))
