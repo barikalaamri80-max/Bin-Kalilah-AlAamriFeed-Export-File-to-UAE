@@ -1,0 +1,146 @@
+{
+  "updatedAt": 1793055000000,
+  "fieldVideos": [
+    {
+      "id": "conv-evidence-1",
+      "url": "/assets/aistudio/lv_0_20261025172813_dfd07d17.mp4",
+      "posterUrl": "/assets/aistudio/poster-conv-1.jpg",
+      "title": "دلائل المحادثات (1): التوثيق الأول للمحادثات والوقائع الرسمية لمسار التصدير",
+      "subtitle": "دلائل المحادثات الموثقة بالصوت والصورة — دليل رسمي رقم (1) قابل للتشغيل بالصوت الواضح وتكبير الشاشة الكاملة",
+      "badge": "دلائل المحادثات · الدليل 1",
+      "durationLabel": "00:43 · بالصوت الواضح",
+      "hasAudio": true,
+      "fitMode": "contain",
+      "heightMode": "lg"
+    },
+    {
+      "id": "conv-evidence-2",
+      "url": "/assets/aistudio/lv_0_20261025172606_734a698d.mp4",
+      "posterUrl": "/assets/aistudio/poster-conv-2.jpg",
+      "title": "دلائل المحادثات (2): التوثيق الثاني للمحادثات والوقائع الرسمية لمسار التصدير",
+      "subtitle": "دلائل المحادثات الموثقة بالصوت والصورة — دليل رسمي رقم (2) قابل للتشغيل بالصوت الواضح وتكبير الشاشة الكاملة",
+      "badge": "دلائل المحادثات · الدليل 2",
+      "durationLabel": "00:43 · بالصوت الواضح",
+      "hasAudio": true,
+      "fitMode": "contain",
+      "heightMode": "lg"
+    },
+    {
+      "id": "conv-evidence-3",
+      "url": "/assets/aistudio/lv_0_20261025175515_91dcbb0a.mp4",
+      "posterUrl": "/assets/aistudio/poster-conv-3.jpg",
+      "title": "دلائل المحادثات (3): التوثيق الثالث للمحادثات والاتصالات الرسمية الموثقة",
+      "subtitle": "دلائل المحادثات الموثقة بالصوت والصورة — دليل رسمي رقم (3) قابل للتشغيل بالصوت الواضح وتكبير الشاشة الكاملة",
+      "badge": "دلائل المحادثات · الدليل 3",
+      "durationLabel": "01:09 · بالصوت الواضح",
+      "hasAudio": true,
+      "fitMode": "contain",
+      "heightMode": "lg"
+    },
+    {
+      "id": "conv-evidence-4",
+      "url": "/assets/aistudio/SVID_20260930_104552_1_d16dc747.mp4",
+      "posterUrl": "/assets/aistudio/poster-conv-4.jpg",
+      "title": "دلائل المحادثات (4): د. راشد حمد (وزارة التغير المناخي والبيئة الإماراتية) — المتطلبات الأساسية على البطاقة التعريفية",
+      "subtitle": "محادثة صوتية ومرئية موثقة توضح أن توفير البيانات الأساسية على البطاقة التعريفية للمنتج من قِبل المصنع كفيل بالموافقة السريعة على الطلب",
+      "badge": "دلائل المحادثات · الدليل 4",
+      "durationLabel": "00:26 · بالصوت الواضح",
+      "hasAudio": true,
+      "fitMode": "contain",
+      "heightMode": "lg"
+    },
+    {
+      "id": "conv-evidence-5",
+      "url": "/assets/aistudio/SVID_20261026_201726_1_2fd01b2c.mp4",
+      "posterUrl": "/assets/aistudio/poster-conv-5.jpg",
+      "title": "دلائل المحادثات (5): نايف العبيدلي (المخلص الجمركي) — توضيح البطاقة التعريفية وإقرار سلامة الغذاء (Food Safety Declaration)",
+      "subtitle": "محادثة صوتية ومرئية موثقة تستعرض وثيقة شركة المطاحن العمانية وتؤكد أن المطلوب فقط وضوح البطاقة التعريفية وإفادة خلو المنتج من المادة لإنهاء الإجراءات",
+      "badge": "دلائل المحادثات · الدليل 5",
+      "durationLabel": "00:34 · بالصوت الواضح",
+      "hasAudio": true,
+      "fitMode": "contain",
+      "heightMode": "lg"
+    },
+    {
+      "id": "conv-evidence-6",
+      "url": "/assets/aistudio/SVID_20261026_201805_1_a183de68.mp4",
+      "posterUrl": "/assets/aistudio/poster-conv-6.jpg",
+      "title": "دلائل المحادثات (6): نايف العبيدلي (المخلص الجمركي) — إفادة الدكتور المختص حول مضاد الكوكسيديا واشتراط كتابة فترة السحب",
+      "subtitle": "محادثة صوتية ومرئية موثقة تفيد بأن المنتج يحتوي على مضاد كوكسيديا يتبقى أثره في اللحم والبيض، واشتراط كتابة مدة السحب على البطاقة التعريفية",
+      "badge": "دلائل المحادثات · الدليل 6",
+      "durationLabel": "00:41 · بالصوت الواضح",
+      "hasAudio": true,
+      "fitMode": "contain",
+      "heightMode": "lg"
+    },
+    {
+      "id": "conv-evidence-7",
+      "url": "/assets/aistudio/SVID_20261026_201937_1_4e268ea8.mp4",
+      "posterUrl": "/assets/aistudio/poster-conv-7.jpg",
+      "title": "دلائل المحادثات (7): د. راشد حمد (وزارة التغير المناخي والبيئة) — اشتراط فترة سحب لا تقل عن 7 أيام وإلا تتوقف الشحنة",
+      "subtitle": "محادثة صوتية ومرئية موثقة تؤكد أن النظام يشترط فترة سحب لا تقل عن 7 أيام وطلب إفادة رسمية من الشركة المنتجة وإلا تتوقف الشحنة والمسؤولية عليهم",
+      "badge": "دلائل المحادثات · الدليل 7",
+      "durationLabel": "00:22 · بالصوت الواضح",
+      "hasAudio": true,
+      "fitMode": "contain",
+      "heightMode": "lg"
+    }
+  ],
+  "bgVideoUrl": "/assets/aistudio/lv_0_20250612010109_5db43f62.mp4",
+  "fleetPhotos": [
+    {
+      "url": "/assets/aistudio/1748373500972_fbbec0fe.jpg",
+      "title": "توثيق ليلي للشاحنات المحملة بأعلاف بركات الوطنية ضمن جدول التصدير",
+      "badge": "جدول 16 تريلا",
+      "mediaType": "image",
+      "posY": 50,
+      "posX": 50,
+      "fitMode": "cover"
+    },
+    {
+      "url": "/assets/aistudio/1757657643149_167f917d.jpg",
+      "title": "العمليات الميدانية والتحميل الفعلي داخل مخازن شركة بن كليلة العامري",
+      "badge": "المخازن والعمليات الميدانية",
+      "mediaType": "image",
+      "posY": 50,
+      "posX": 50,
+      "fitMode": "cover"
+    },
+    {
+      "url": "/assets/aistudio/fleet1.jpg",
+      "title": "انطلاق الشحنة الأولى وعبور منفذ خطم الشكلة خلال 24 ساعة",
+      "badge": "عقد شحن المئة أسبوع",
+      "mediaType": "image",
+      "posY": 50,
+      "posX": 50,
+      "fitMode": "cover"
+    },
+    {
+      "url": "/assets/aistudio/fleet2.jpg",
+      "title": "جاهزية الشاحنات المعتمدة لنقل شحنات أعلاف الدواجن (علامة بركات)",
+      "badge": "سداد نقدي مسبق 100%",
+      "mediaType": "image",
+      "posY": 50,
+      "posX": 50,
+      "fitMode": "cover"
+    },
+    {
+      "url": "/assets/aistudio/Screenshot_20251102_070334349_69d4bd17.jpg",
+      "title": "العرض الاستراتيجي لتعزيز الحصة السوقية وحوكمة الصادرات غير النفطية",
+      "badge": "رؤية عُمان 2040",
+      "mediaType": "image",
+      "posY": 50,
+      "posX": 50,
+      "fitMode": "cover"
+    },
+    {
+      "url": "/assets/aistudio/fleet3.jpg",
+      "title": "توثيق ميداني لجدول شحن الـ 16 تريلا لصالح مزرعة بركة الوقن",
+      "badge": "جدول 16 تريلا",
+      "mediaType": "image",
+      "posY": 50,
+      "posX": 50,
+      "fitMode": "cover"
+    }
+  ]
+}

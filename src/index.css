@@ -1,0 +1,124 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Cairo', 'Tajawal', sans-serif;
+    background-color: #160729;
+    color: #f5eedc;
+    overflow-x: hidden;
+  }
+}
+
+/* Light Transparent Royal Purple & Gold Glass Theme — Interactive Background Videos Clearly Visible */
+.bg-milky-canvas {
+  background: transparent !important;
+}
+
+.transparent-hero-theme section.bg-\[\#faf7f0\],
+.transparent-hero-theme article.bg-\[\#faf7f0\] {
+  background-color: rgba(29, 11, 53, var(--glass-alpha, 0.42)) !important;
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  color: #f8f3e6 !important;
+  border-color: rgba(201, 164, 82, 0.85) !important;
+  box-shadow: 0 12px 32px -8px rgba(8, 2, 18, 0.45) !important;
+}
+
+.transparent-hero-theme section.bg-\[\#faf7f0\] h3,
+.transparent-hero-theme section.bg-\[\#faf7f0\] h4,
+.transparent-hero-theme article.bg-\[\#faf7f0\] h3,
+.transparent-hero-theme article.bg-\[\#faf7f0\] h4 {
+  color: #f3dfa6 !important;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+}
+
+.transparent-hero-theme section.bg-\[\#faf7f0\] p,
+.transparent-hero-theme article.bg-\[\#faf7f0\] p,
+.transparent-hero-theme article.bg-\[\#faf7f0\] li {
+  color: #fffcf5 !important;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+}
+
+.transparent-hero-theme section.bg-\[\#faf7f0\] strong,
+.transparent-hero-theme article.bg-\[\#faf7f0\] strong {
+  color: #ffe59e !important;
+}
+
+.transparent-hero-theme section.bg-\[\#faf7f0\] span.text-\[\#9c7625\],
+.transparent-hero-theme article.bg-\[\#faf7f0\] span.text-\[\#9c7625\],
+.transparent-hero-theme section.bg-\[\#faf7f0\] span.text-\[\#8f6718\],
+.transparent-hero-theme section.bg-\[\#faf7f0\] span.text-\[\#8c671d\] {
+  color: #e7cb82 !important;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+}
+
+.transparent-hero-theme .bg-\[\#f3ede0\],
+.transparent-hero-theme .bg-\[\#fffdf9\] {
+  background-color: rgba(39, 16, 70, 0.44) !important;
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  border-color: rgba(201, 164, 82, 0.7) !important;
+  color: #f8f3e6 !important;
+}
+
+/* Royal Purple Card with Metallic Gold Border (Light Transparent Opacity for Video Visibility) */
+.royal-purple-box {
+  background: linear-gradient(
+    145deg,
+    rgba(45, 18, 78, 0.48) 0%,
+    rgba(28, 10, 52, 0.54) 100%
+  );
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  border: 1.5px solid #c9a452;
+  box-shadow: 0 10px 26px -6px rgba(14, 4, 28, 0.45), inset 0 1px 0 rgba(255, 232, 179, 0.2);
+}
+
+/* Royal Purple Node Box (Light Transparent Opacity for Video Visibility) */
+.royal-node-card {
+  background: linear-gradient(
+    180deg,
+    rgba(52, 22, 90, 0.48) 0%,
+    rgba(33, 13, 60, 0.54) 100%
+  );
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  border: 2px solid #c9a452;
+  box-shadow: 0 10px 24px -6px rgba(18, 6, 36, 0.45), inset 0 0 0 1px rgba(235, 204, 131, 0.22);
+}
+
+/* Metallic Gold Gradient Ribbon & Pill */
+.gold-metallic-ribbon {
+  background: linear-gradient(
+    90deg,
+    rgba(197, 155, 67, 0.96) 0%,
+    rgba(231, 203, 130, 0.98) 50%,
+    rgba(197, 155, 67, 0.96) 100%
+  );
+  color: #1e0b36;
+  border-top: 1px solid #f3dfa6;
+  border-bottom: 1px solid #a67d29;
+}
+
+.gold-metallic-card {
+  background: linear-gradient(135deg, #e5c97e 0%, #c89f46 50%, #dfbe6f 100%);
+  border: 1.5px solid #a87f2a;
+  color: #1e0b36;
+  box-shadow: 0 8px 20px -4px rgba(182, 141, 59, 0.35);
+}
+
+.gold-glow-text {
+  background: linear-gradient(180deg, #fff1c2 0%, #e5c165 55%, #c4973b 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background-color: #faf7f0 !important;
+    color: #23113d !important;
+  }
+}
