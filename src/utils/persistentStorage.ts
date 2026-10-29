@@ -1,8 +1,11 @@
 import {
+  ApprovedAudioRecording,
+  APPROVED_AUDIO_RECORDINGS,
   DocumentItem,
   FieldVideoItem,
   TopShowcaseItem,
   FIELD_VIDEOS,
+  FLEET_PHOTOS,
   INITIAL_DOCUMENTS,
 } from '../data/dossierData';
 
@@ -10,16 +13,38 @@ const STORAGE_KEY_STATE = 'binkalilah_permanent_dossier_state_v4';
 const IDB_NAME = 'BinKalilahPermanentMediaDB';
 const IDB_STORE = 'media_blobs';
 
+export interface ModificationLogEntry {
+  id: string;
+  timestamp: string;
+  action: 'إضافة' | 'استبدال' | 'حذف' | 'تحديث';
+  target: string;
+  details: string;
+}
+
 export interface PersistedDossierState {
   fieldVideos?: FieldVideoItem[];
   bgVideoUrl?: string;
+  openingVideoUrl?: string;
   fleetPhotos?: TopShowcaseItem[];
   documents?: DocumentItem[];
+  audioRecordings?: ApprovedAudioRecording[];
+  deletedIds?: string[];
+  bgCycleIntervalSec?: number;
+  customBgUrls?: string[];
+  modificationLogs?: ModificationLogEntry[];
   updatedAt: number;
 }
 
 // Pool of verified working studio video URLs on disk to heal any stale/broken blob: or missing URLs
 const FALLBACK_WORKING_VIDEOS = [
+  '/assets/aistudio/lv_0_20261028134636_4e4aa5be.mp4',
+  '/assets/aistudio/lv_0_20261028134539_f77457c5.mp4',
+  '/assets/aistudio/lv_0_20261028134455_cc14d4e3.mp4',
+  '/assets/aistudio/lv_0_20261028134407_7852f706.mp4',
+  '/assets/aistudio/lv_0_20261028134258_d3832aa8.mp4',
+  '/assets/aistudio/lv_0_20261028133940_fa89726b.mp4',
+  '/assets/aistudio/lv_0_20261028133832_1c84c9bf.mp4',
+  '/assets/aistudio/lv_0_20261028133542_ab5f6431.mp4',
   '/user_uploads/media_vid_vid-warehouse-capacity.mp4',
   '/user_uploads/media_vid_vid-warehouse-gate.mp4',
   '/user_uploads/media_vid_vid-logistics-hub.mp4',
@@ -43,6 +68,17 @@ const LEGACY_TRUCK_DOC_IDS = new Set([
   'doc-uploaded-1792983040360-zkwi',
   'doc-uploaded-1792982374573-ymib',
 ]);
+
+export function sanitizeDisplayText(text?: string): string {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/_/g, ' ')
+    .replace(/شركتنا\s+ب[أا]نها\s+شرك[ةه]\s+مساهم[ةه]\s+عام[ةه]/g, 'شركة بن كليلة العامري للتجارة والاستثمار')
+    .replace(/شرك[ةه]\s+مساهم[ةه]\s+عام[ةه]/g, 'شركة بن كليلة العامري للتجارة والاستثمار')
+    .replace(/بساعية\s+الدؤب|بسعية\s+الدؤوب/g, 'بسعيه الدؤوب')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 function openMediaDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -76,7 +112,7 @@ export async function saveBlobToIndexedDB(key: string, blob: Blob): Promise<void
   }
 }
 
-export async function loadBlobUrlFromIndexedDB(key: string): Promise<string | null> {
+export async function loadBlobUrlFromIndexedDB(key: string): Promise<string> {
   try {
     const db = await openMediaDB();
     const blob = await new Promise<Blob | undefined>((resolve, reject) => {
@@ -88,9 +124,9 @@ export async function loadBlobUrlFromIndexedDB(key: string): Promise<string | nu
     if (blob instanceof Blob && blob.size > 0) {
       return URL.createObjectURL(blob);
     }
-    return null;
+    return '';
   } catch {
-    return null;
+    return '';
   }
 }
 
@@ -185,14 +221,24 @@ export function normalizePersistedState(
 ): PersistedDossierState | null {
   if (!state || typeof state !== 'object') return null;
   const normalized: PersistedDossierState = { ...state };
+  const deletedSet = new Set(Array.isArray(normalized.deletedIds) ? normalized.deletedIds : []);
 
   if (Array.isArray(normalized.fleetPhotos)) {
-    normalized.fleetPhotos = normalized.fleetPhotos.map((item, idx) => {
-      let badge = item.badge || '';
+    const existingUrls = new Set(normalized.fleetPhotos.map((p) => p.url));
+    const missingFleetVideos = FLEET_PHOTOS.filter(
+      (defItem) => !existingUrls.has(defItem.url) && !deletedSet.has(defItem.url)
+    );
+    const combinedFleet = [...missingFleetVideos, ...normalized.fleetPhotos].filter(
+      (item) => !deletedSet.has(item.url)
+    );
+    normalized.fleetPhotos = combinedFleet.map((item, idx) => {
+      let badge = sanitizeDisplayText(item.badge || '');
       if (badge.includes('16 تريلا') || badge.includes('أسطول')) {
         badge = 'جدول 16 تريلا';
       }
-      const title = (item.title || '').replace('والجاهزة للتصدير', 'ضمن جدول التصدير');
+      const title = sanitizeDisplayText(
+        (item.title || '').replace('والجاهزة للتصدير', 'ضمن جدول التصدير')
+      );
       const url = isStaleOrBrokenUrl(item.url)
         ? FALLBACK_WORKING_VIDEOS[idx % FALLBACK_WORKING_VIDEOS.length]
         : item.url;
@@ -200,35 +246,98 @@ export function normalizePersistedState(
     });
   }
 
-  // Always preserve the 7 canonical Conversation Evidence videos with their interior WhatsApp/Document posterUrl
-  normalized.fieldVideos = FIELD_VIDEOS.map((defaultVid) => ({
-    ...defaultVid,
-  }));
+  // Preserve user customizations (replacements, additions, and deletions) in fieldVideos
+  if (Array.isArray(normalized.fieldVideos)) {
+    normalized.fieldVideos = normalized.fieldVideos
+      .filter((vid) => vid && !deletedSet.has(vid.id))
+      .map((vid, idx) => {
+        const defaultMatch = FIELD_VIDEOS.find((d) => d.id === vid.id);
+        const fallbackUrl =
+          defaultMatch?.url || FALLBACK_WORKING_VIDEOS[idx % FALLBACK_WORKING_VIDEOS.length];
+        const healedUrl = isStaleOrBrokenUrl(vid.url) ? fallbackUrl : vid.url;
+        return {
+          ...vid,
+          url: healedUrl,
+          title: sanitizeDisplayText(vid.title || defaultMatch?.title || 'فيديو توثيقي ميداني'),
+          subtitle: sanitizeDisplayText(vid.subtitle || defaultMatch?.subtitle || ''),
+          badge: sanitizeDisplayText(vid.badge || defaultMatch?.badge || `دلائل المحادثات · ${idx + 1}`),
+          posterUrl:
+            vid.posterUrl && !vid.posterUrl.startsWith('blob:')
+              ? vid.posterUrl
+              : defaultMatch?.posterUrl,
+          hasAudio: vid.hasAudio ?? true,
+          fitMode: vid.fitMode || 'contain',
+          heightMode: vid.heightMode || 'lg',
+        };
+      });
+  }
 
   if (Array.isArray(normalized.documents)) {
-    const cleanedDocs = normalized.documents
-      .filter((doc) => !LEGACY_TRUCK_DOC_IDS.has(doc.id))
+    const existingDocIds = new Set(normalized.documents.map((d) => d?.id));
+    const missingDefaultDocs = INITIAL_DOCUMENTS.filter(
+      (defDoc) => !existingDocIds.has(defDoc.id) && !deletedSet.has(defDoc.id)
+    );
+    const combinedDocs = [...missingDefaultDocs, ...normalized.documents];
+
+    const cleanedDocs = combinedDocs
+      .filter((doc) => doc && !LEGACY_TRUCK_DOC_IDS.has(doc.id) && !deletedSet.has(doc.id))
       .map((doc, idx) => {
-        const builtin = INITIAL_DOCUMENTS.find((d) => d.id === doc.id);
-        if (builtin && !doc.id.startsWith('doc-uploaded-')) {
-          return {
-            ...builtin,
-            scale: doc.scale || 100,
-            heightMode: doc.heightMode || 'md',
-            widthMode: doc.widthMode || 'normal',
-            fitMode: doc.fitMode || 'cover',
-            posY: typeof doc.posY === 'number' ? doc.posY : 50,
-          };
+        const defaultDocMatch = INITIAL_DOCUMENTS.find((d) => d.id === doc.id);
+        const isPdf =
+          doc.mediaType === 'pdf' ||
+          doc.mimeType === 'application/pdf' ||
+          Boolean(doc.fileUrl && doc.fileUrl.toLowerCase().endsWith('.pdf'));
+
+        const isPresentation = doc.mediaType === 'presentation' && !doc.fileUrl;
+
+        let healedFileUrl = doc.fileUrl || defaultDocMatch?.fileUrl;
+        if (!isPresentation && isStaleOrBrokenUrl(healedFileUrl)) {
+          healedFileUrl =
+            defaultDocMatch?.fileUrl ||
+            (isPdf
+              ? '/assets/aistudio/Evidence_of_Procedural_Obstruction__1__1__7f16e01d.pdf'
+              : FALLBACK_WORKING_VIDEOS[idx % FALLBACK_WORKING_VIDEOS.length]);
         }
 
-        const healedUrl = isStaleOrBrokenUrl(doc.fileUrl)
-          ? FALLBACK_WORKING_VIDEOS[idx % FALLBACK_WORKING_VIDEOS.length]
-          : doc.fileUrl;
+        // Never assign an .mp4 truck video as previewUrl for a PDF document
+        let healedPreviewUrl = doc.previewUrl || defaultDocMatch?.previewUrl;
+        if (isPdf) {
+          if (
+            !healedPreviewUrl ||
+            isStaleOrBrokenUrl(healedPreviewUrl) ||
+            /\.(mp4|mov|webm)$/i.test(healedPreviewUrl)
+          ) {
+            healedPreviewUrl =
+              defaultDocMatch?.previewUrl ||
+              '/assets/aistudio/Screenshot_20251102_070334349_69d4bd17.jpg';
+          }
+        } else if (!isPresentation) {
+          if (!healedPreviewUrl || isStaleOrBrokenUrl(healedPreviewUrl)) {
+            healedPreviewUrl = healedFileUrl;
+          }
+        }
+
+        const sanitizedPages = Array.isArray(doc.pages)
+          ? doc.pages.map((p) => ({
+              ...p,
+              title: sanitizeDisplayText(p.title),
+              subtitle: sanitizeDisplayText(p.subtitle),
+              referenceCode: sanitizeDisplayText(p.referenceCode || 'EVID2026').replace(/-/g, ''),
+              content: Array.isArray(p.content)
+                ? p.content.map((line) => sanitizeDisplayText(line))
+                : [],
+            }))
+          : [];
 
         return {
           ...doc,
-          fileUrl: healedUrl,
-          previewUrl: doc.previewUrl && !isStaleOrBrokenUrl(doc.previewUrl) ? doc.previewUrl : healedUrl,
+          title: sanitizeDisplayText(doc.title),
+          description: sanitizeDisplayText(doc.description),
+          badge: sanitizeDisplayText(doc.badge),
+          mediaType: isPdf ? 'pdf' : doc.mediaType,
+          fileUrl: healedFileUrl,
+          previewUrl: healedPreviewUrl,
+          pages: sanitizedPages,
           scale: doc.scale || 100,
           heightMode: doc.heightMode || 'md',
           widthMode: doc.widthMode || 'normal',
@@ -237,7 +346,55 @@ export function normalizePersistedState(
         };
       });
 
-    normalized.documents = cleanedDocs.length > 0 ? cleanedDocs : INITIAL_DOCUMENTS;
+    normalized.documents = cleanedDocs;
+  }
+
+  if (Array.isArray(normalized.audioRecordings)) {
+    const mergedAudio: ApprovedAudioRecording[] = APPROVED_AUDIO_RECORDINGS.filter(
+      (defRec) => !deletedSet.has(defRec.id)
+    ).map((defRec) => {
+      const savedMatch = normalized.audioRecordings?.find((r) => r.id === defRec.id);
+      if (savedMatch && savedMatch.url && !savedMatch.url.startsWith('blob:')) {
+        return {
+          ...defRec,
+          ...savedMatch,
+          badge: sanitizeDisplayText(savedMatch.badge || defRec.badge),
+          title: sanitizeDisplayText(savedMatch.title || defRec.title),
+          description: sanitizeDisplayText(savedMatch.description || defRec.description),
+        };
+      }
+      return defRec;
+    });
+
+    // Append any custom user-added audio recordings (excluding duplicate main-dossier)
+    normalized.audioRecordings.forEach((customRec) => {
+      if (
+        customRec &&
+        customRec.id !== 'main-dossier' &&
+        customRec.id &&
+        !deletedSet.has(customRec.id) &&
+        !mergedAudio.some((m) => m.id === customRec.id) &&
+        customRec.url &&
+        !customRec.url.startsWith('blob:')
+      ) {
+        mergedAudio.push({
+          ...customRec,
+          badge: sanitizeDisplayText(customRec.badge),
+          title: sanitizeDisplayText(customRec.title),
+          description: sanitizeDisplayText(customRec.description),
+        });
+      }
+    });
+
+    normalized.audioRecordings = mergedAudio;
+  }
+
+  if (Array.isArray(normalized.modificationLogs)) {
+    normalized.modificationLogs = normalized.modificationLogs.map((log) => ({
+      ...log,
+      target: sanitizeDisplayText(log.target),
+      details: sanitizeDisplayText(log.details),
+    }));
   }
 
   return normalized;
@@ -259,12 +416,12 @@ export async function savePermanentDossierState(
 ): Promise<void> {
   try {
     const current = loadLocalPersistedState() || { updatedAt: 0 };
-    const merged: PersistedDossierState = {
+    const rawMerged: PersistedDossierState = {
       ...current,
       ...partial,
       updatedAt: Date.now(),
     };
-    // Avoid saving ephemeral blob: URLs to server JSON if a permanent URL is pending; normalize before saving
+    const merged = normalizePersistedState(rawMerged) || rawMerged;
     window.localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(merged));
 
     await fetch('/api/state/save', {

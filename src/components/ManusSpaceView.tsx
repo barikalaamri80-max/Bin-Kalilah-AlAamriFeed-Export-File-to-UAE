@@ -19,7 +19,7 @@ interface ManusSpaceViewProps {
 const MANUS_TIMELINE = [
   {
     index: '01',
-    date: '2023 – 2025',
+    date: '2023 إلى 2025',
     title: 'سابقة سوق صلالة',
     desc: 'مراسلات ومذكرات حول عدالة المنافسة والدعم اللوجستي، أعقبها إغلاق المسار المحلي والانتقال نحو التصدير غير النفطي.',
   },
@@ -50,8 +50,8 @@ const MANUS_TIMELINE = [
   {
     index: '06',
     date: 'أكتوبر 2026',
-    title: 'المذكرات الرقابية (الفاضل خالد المسروري)',
-    desc: 'توجيه مذكرات واستفسارات رسمية بعناية الفاضل خالد المسروري للمطالبة بالتصحيح المستندي وحماية الصادرات غير النفطية.',
+    title: 'المذكرات الرقابية (أستاذ خالد المسروري)',
+    desc: 'توجيه مذكرات واستفسارات رسمية بعناية أستاذ خالد المسروري مدير دائرة الاحتكار للمطالبة بالتصحيح المستندي وحماية الصادرات غير النفطية.',
   },
 ];
 
@@ -74,7 +74,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
   const [chatItems, setChatItems] = useState<{ role: 'user' | 'assistant'; text: string }[]>([
     {
       role: 'assistant',
-      text: 'مرحباً بكم في ملف «تحديات التنويع الاقتصادي: عوائق أمام الصادرات غير النفطية في مسار رؤية عُمان 2040» الخاص بشركة بن كليلة العامري للتجارة والاستثمار (ملف المراجع: الفاضل خالد المسروري). أستطيع شرح الأدلة، التسلسل الزمني، والسند القانوني.',
+      text: 'مرحباً بكم في ملف «تحديات التنويع الاقتصادي: عوائق أمام الصادرات غير النفطية في مسار رؤية عُمان 2040» الخاص بشركة بن كليلة العامري للتجارة والاستثمار (ملف المراجع أستاذ خالد المسروري). أستطيع شرح الأدلة، التسلسل الزمني، والسند القانوني.',
     },
   ]);
   const [chatInput, setChatInput] = useState('');
@@ -89,7 +89,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
         text.includes(word)
       )
     ) {
-      return 'شركة بن كليلة العامري للتجارة والاستثمار ملتزمة بالسداد النقدي المسبق 100% (18,640 ر.ع). القضية هي تعطيل إجرائي وتناقض مستندي وامتناع ضمني عن تسليم ملحقات المبيع في مسار رؤية عُمان 2040.';
+      return 'شركة بن كليلة العامري للتجارة والاستثمار ملتزمة بالسداد النقدي المسبق 100% بالكامل. القضية هي تعطيل إجرائي وتناقض مستندي وامتناع ضمني عن تسليم ملحقات المبيع في مسار رؤية عُمان 2040.';
     }
     if (
       ['تأخير', 'تعطيل', 'مدة', 'كم شهر', '57', 'خمس أشهر'].some((word) => text.includes(word))
@@ -97,15 +97,15 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
       return '5 أشهر و18 يوماً من التعطيل الإجرائي أمام الصادرات غير النفطية في مسار رؤية عُمان 2040.';
     }
     if (['قانون', 'مرسوم', 'المادة', 'سند', 'تشريع'].some((word) => text.includes(word))) {
-      return 'المرسوم السلطاني 67/2014 (المادتان 9 و10 من قانون حماية المنافسة ومنع الاحتكار) والمرسوم السلطاني 29/2013 (المادة 381 والمادتان 155 و156 من قانون المعاملات المدنية).';
+      return 'المرسوم السلطاني 67 لسنة 2014 (المادتان 9 و10 من قانون حماية المنافسة ومنع الاحتكار) والمرسوم السلطاني 29 لسنة 2013 (المادة 381 والمادتان 155 و156 من قانون المعاملات المدنية).';
     }
     if (['دليل', 'أدلة', 'إثبات', 'وثيقة'].some((word) => text.includes(word))) {
-      return 'الأدلة المرفوعة في ملف المراجع الفاضل خالد المسروري تشمل طلب التشغيل في 7 مايو 2026، إشعارات السداد المسبق 100%، مقارنة شهادة التحليل COA (23 يونيو 2026) بالبطاقة التعريفية، وإشعار نظام MOCCAE رقم (APH-12052026-3382929).';
+      return 'الأدلة المرفوعة في ملف المراجع أستاذ خالد المسروري تشمل طلب التشغيل في 7 مايو 2026، إشعارات السداد المسبق 100%، مقارنة شهادة التحليل COA (23 يونيو 2026) بالبطاقة التعريفية، وإشعار نظام MOCCAE.';
     }
     if (['وسيط', 'نوفل', 'عميل', 'قناة', 'الوقن'].some((word) => text.includes(word))) {
-      return 'يوثق الملف والتسجيل الصوتي للمكالمة الثلاثية (30 دقيقة) حجب المستندات البيطرية الإلزامية لخنق خط التصدير واستنزاف مخزون المزرعة (160,000 طير) بهدف إجبار العميل على اللجوء للوسيط الخارجي (نوفل)، فضلاً عن احتجاز الشاحنات 4 أيام بعد استلام مقدم النقل (700 ر.ع) وفرض إتاوة 50 ر.ع لكل شحنة.';
+      return 'يوثق الملف والتسجيل الصوتي للمكالمة الثلاثية (30 دقيقة) حجب المستندات البيطرية الإلزامية لخنق خط التصدير واستنزاف مخزون المزرعة (160,000 طير) بهدف إجبار العميل على اللجوء للوسيط الخارجي (نوفل)، فضلاً عن احتجاز الشاحنات 4 أيام بعد استلام مقدم النقل النقدي وفرض إتاوة 50 ر.ع لكل شحنة.';
     }
-    return 'يمكنني شرح الأدلة، دور الوسيط (نوفل)، مدة التعطيل (5 أشهر و18 يوماً)، أو السند القانوني ضمن ملف المراجع الفاضل خالد المسروري.';
+    return 'يمكنني شرح الأدلة، دور الوسيط (نوفل)، مدة التعطيل (5 أشهر و18 يوماً)، أو السند القانوني ضمن ملف المراجع أستاذ خالد المسروري.';
   };
 
   const sendMessage = (val: string) => {
@@ -196,7 +196,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
                 شركة بن كليلة العامري للتجارة والاستثمار
               </span>
               <span className="block text-[11px] font-bold text-[#9c7625]">
-                ملف المراجع: الفاضل خالد المسروري
+                ملف المراجع أستاذ خالد المسروري
               </span>
             </div>
           </a>
@@ -209,7 +209,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
               التسلسل الزمني
             </a>
             <a href="#podcast" className="hover:text-[#9c7625] transition-colors">
-              التسجيل الصوتي (10 فصول)
+              التسجيل الصوتي
             </a>
             <a href="#assistant" className="hover:text-[#9c7625] transition-colors">
               المساعد الذكي
@@ -247,7 +247,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
         <div className="max-w-6xl mx-auto px-4 sm:px-6 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
           <div className="lg:col-span-7">
             <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full gold-metallic-card text-xs font-extrabold mb-4">
-              <span>ملف المراجع: الفاضل خالد المسروري · رؤية عُمان 2040</span>
+              <span>ملف المراجع أستاذ خالد المسروري · رؤية عُمان 2040</span>
             </div>
             <h1 className="text-2xl sm:text-4xl lg:text-[40px] font-black text-[#2b124c] leading-[1.3]">
               تحديات التنويع الاقتصادي:
@@ -265,7 +265,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
                 href="#podcast"
                 className="inline-flex items-center gap-2 rounded-xl px-5 py-3 gold-metallic-card text-xs font-extrabold shadow-md transition-all"
               >
-                <span>▶️ استمع إلى المحاكاة الصوتية (08:39)</span>
+                <span>▶️ استمع إلى المحاكاة الصوتية</span>
               </a>
               <a
                 href="#assistant"
@@ -303,7 +303,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
               <div className="p-3 rounded-xl bg-white/10 border border-[#c9a452]/40">
                 <small className="block text-[#e7cb82] text-[10px] font-bold">المسؤول المراجع</small>
                 <strong className="block mt-1 text-xs font-extrabold text-white">
-                  الفاضل خالد المسروري
+                  أستاذ خالد المسروري مدير الدائرة
                 </strong>
               </div>
               <div className="p-3 rounded-xl bg-white/10 border border-[#c9a452]/40">
@@ -315,7 +315,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
               <div className="p-3 rounded-xl bg-white/10 border border-[#c9a452]/40">
                 <small className="block text-[#e7cb82] text-[10px] font-bold">الوسيط المتدخل</small>
                 <strong className="block mt-1 text-xs font-extrabold text-white">
-                  نوفل (أطواف جلوبال)
+                  نوفل (أطياف جلوبال)
                 </strong>
               </div>
             </div>
@@ -339,8 +339,8 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
               الوقائع أولاً، ثم التكييف القانوني في مسار رؤية عُمان 2040
             </h2>
             <p className="mt-4 text-[#4a3963] text-sm leading-[2]">
-              يضع هذا العرض المسار التشغيلي لشركة بن كليلة العامري للتجارة والاستثمار أمام الفاضل
-              خالد المسروري وجهات الاختصاص قبل الانتقال إلى التوصيف القانوني.
+              يضع هذا العرض المسار التشغيلي لشركة بن كليلة العامري للتجارة والاستثمار أمام أستاذ
+              خالد المسروري مدير دائرة الاحتكار وجهات الاختصاص قبل الانتقال إلى التوصيف القانوني.
             </p>
           </div>
 
@@ -355,20 +355,20 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
               {
                 label: 'الالتزام النقدي المسبق',
                 icon: '100%',
-                title: '18,640 ر.ع سداد نقدي مسبق',
-                desc: 'جدول 16 تريلا لكل دورة تشغيلية (40 يوماً) لصالح مزرعة بركة الوقن بقيمة عقدية سنوية 1,870,000 ر.ع.',
+                title: 'سداد نقدي مسبق بالكامل',
+                desc: 'جدول 16 تريلا لكل دورة تشغيلية (40 يوماً) لصالح مزرعة بركة الوقن ضمن عقد شحن المئة أسبوع.',
               },
               {
                 label: 'حماية المنافسة',
                 icon: '⚖',
-                title: 'المادتان 9 و10 (مرسوم 67/2014)',
+                title: 'المادتان 9 و10 (مرسوم 67 لسنة 2014)',
                 desc: 'الإطار المطلوب فحصه هو الاتفاقات والممارسات المحظورة وإساءة استغلال الوضع المهيمن.',
               },
               {
                 label: 'خنق خط التصدير',
                 icon: '!',
                 title: 'الوسيط الخارجي (نوفل) واحتجاز الشاحنات',
-                desc: 'حجب الوثائق البيطرية لاستنزاف مخزون المزرعة ودفعها قسراً للوسيط، واحتجاز الشاحنات 4 أيام بعد استلام مقدم النقل (700 ر.ع).',
+                desc: 'حجب الوثائق البيطرية لاستنزاف مخزون المزرعة ودفعها قسراً للوسيط، واحتجاز الشاحنات 4 أيام بعد استلام مقدم النقل النقدي.',
               },
             ].map((card) => (
               <article
@@ -425,20 +425,20 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
         </div>
       </section>
 
-      {/* Section 03: Original Audio in 10 Chapters */}
+      {/* Section 03: Original Audio Chapters */}
       <section id="podcast" className="py-14 lg:py-18">
         <div className="max-w-6xl mx-auto px-4 sm:px-6">
           <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
             <div>
               <p className="inline-flex items-center gap-2 text-[#e7cb82] text-xs font-extrabold tracking-widest mb-3">
                 <span className="w-6 h-0.5 bg-[#c9a452] inline-block" />
-                <span>03 · ORIGINAL AUDIO (08:36)</span>
+                <span>03 · ORIGINAL AUDIO</span>
               </p>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-[#f3dfa6]">
                 التسجيل الصوتي الكامل منسقاً ومكتوباً في محاوره المعتمدة
               </h2>
               <p className="mt-2 text-[#e8dff5] text-sm">
-                ملف صوتي موحد (08:36) بصوت المستثمر بريك بن كليلة العامري مع النص الحرفي الكامل لكل محور.
+                ملف صوتي موحد بصوت المستثمر بريك بن كليلة العامري مع النص الحرفي الكامل لكل محور.
               </p>
             </div>
 
@@ -575,7 +575,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
             </h2>
             <p className="mt-3 text-[#4a3963] text-sm leading-[2]">
               قاعدة معرفة تفاعلية مخصصة لملف شركة بن كليلة العامري للتجارة والاستثمار المرفوع بعناية
-              الفاضل خالد المسروري.
+              أستاذ خالد المسروري مدير دائرة الاحتكار.
             </p>
 
             <div className="grid gap-2 mt-6">
@@ -602,7 +602,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
                 <div>
                   <h3 className="text-sm font-extrabold text-[#2b124c]">مساعد الملف الرقابي</h3>
                   <small className="text-[11px] text-[#8c671d]">
-                    ملف المراجع: الفاضل خالد المسروري
+                    ملف المراجع أستاذ خالد المسروري
                   </small>
                 </div>
               </div>
@@ -670,7 +670,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
 
           <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-4">
             <article className="p-5 rounded-2xl royal-node-card text-white">
-              <span className="text-[#e7cb82] text-xs font-extrabold">المرسوم السلطاني 67/2014</span>
+              <span className="text-[#e7cb82] text-xs font-extrabold">المرسوم السلطاني 67 لسنة 2014</span>
               <h3 className="mt-2 text-base font-extrabold text-white">
                 حماية المنافسة ومنع الاحتكار
               </h3>
@@ -681,7 +681,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
             </article>
 
             <article className="p-5 rounded-2xl royal-node-card text-white">
-              <span className="text-[#e7cb82] text-xs font-extrabold">المرسوم السلطاني 29/2013</span>
+              <span className="text-[#e7cb82] text-xs font-extrabold">المرسوم السلطاني 29 لسنة 2013</span>
               <h3 className="mt-2 text-base font-extrabold text-white">قانون المعاملات المدنية</h3>
               <p className="mt-2 text-[#e8dff5] text-xs leading-[1.9]">
                 المادة 381 والمادتان 155 و156 حول وجوب تسليم المبيع وتوابعه وملحقاته الضرورية
@@ -708,7 +708,7 @@ export const ManusSpaceView: React.FC<ManusSpaceViewProps> = ({
                 شركة بن كليلة العامري للتجارة والاستثمار
               </span>
               <span className="block text-xs text-[#e7cb82]">
-                ملف المراجع: الفاضل خالد المسروري · رؤية عُمان 2040
+                ملف المراجع أستاذ خالد المسروري · رؤية عُمان 2040
               </span>
             </div>
           </div>

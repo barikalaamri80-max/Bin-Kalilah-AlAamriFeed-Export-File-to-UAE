@@ -70,6 +70,8 @@ import {
   SYNCED_SCRIPT_SEGMENTS,
   RECORDING_VERBATIM_SECTIONS,
   ADVISOR_PREGENERATED_AUDIO_URLS,
+  AUDIO_DEDUPLICATION_CHANGELOG,
+  ApprovedAudioRecording,
   DocumentItem,
   FieldVideoItem,
   OriginalAudioChapter,
@@ -104,7 +106,7 @@ const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 const INITIAL_WELCOME_MESSAGE: ChatMessage = {
   id: 'welcome-msg',
   role: 'assistant',
-  text: 'مرحباً بكم أصحاب المعالي والسعادة، والفاضل خالد المسروري المحترم (مدير عام مركز حماية المنافسة ومنع الاحتكار)، والمختصين الكرام في المستشار الرقابي التفاعلي للملف المعنون: «تحديات التنويع الاقتصادي: عوائق أمام الصادرات غير النفطية في مسار رؤية عُمان 2040» والخاص بشركة بن كليلة العامري للتجارة والاستثمار ضد شركة المطاحن العمانية. يسعدني تقديم الإجابات القانونية والردود الموثقة استناداً للمراسيم السلطانية (67/2014 و29/2013). تفضلوا بطرح استفساركم أو النقر على الأسئلة السريعة أعلاه.',
+  text: 'مرحباً بكم أستاذ خالد المسروري المحترم مدير عام مركز حماية المنافسة ومنع الاحتكار، والمختصين الكرام في المستشار الرقابي التفاعلي للملف المعنون: «تحديات التنويع الاقتصادي: عوائق أمام الصادرات غير النفطية في مسار رؤية عُمان 2040» والخاص بشركة بن كليلة العامري للتجارة والاستثمار ضد شركة المطاحن العمانية. يسعدني تقديم الإجابات القانونية والردود الموثقة استناداً للمراسيم السلطانية (67 لسنة 2014 و 29 لسنة 2013). تفضلوا بطرح استفساركم أو النقر على الأسئلة السريعة أعلاه.',
   timestamp: 'الآن',
 };
 
@@ -196,8 +198,10 @@ export default function App() {
   const [passwordError, setPasswordError] = useState<string>('');
   const [viewMode, setViewMode] = useState<'royal' | 'manus'>('royal');
 
-  // Hide studio video-replacement and screen-sizing control panels for clean publication while keeping all customized videos intact
-  const [showStudioControls] = useState<boolean>(false);
+  // Keep studio controls active by default so PDF upload and media replacement/addition buttons work immediately,
+  // with a 1-click toggle to lock into clean Public Viewer Mode when desired.
+  const [showStudioControls, setShowStudioControls] = useState<boolean>(true);
+  const [showInternalAdminPanel, setShowInternalAdminPanel] = useState<boolean>(false);
 
   // Light, transparent Royal Purple glass opacity (0.42 default) so interactive background videos are clearly visible
   const [glassTheme] = useState<'hero' | 'cream'>('hero');
@@ -263,14 +267,56 @@ export default function App() {
   const lastExecSentenceIdRef = useRef<string | null>(null);
   const lastClarificationSentenceIdRef = useRef<string | null>(null);
 
-  // Approved Recording Switcher state (Dropdown + Tabs for the 3 deduplicated recordings)
-  const [selectedApprovedRecordingId, setSelectedApprovedRecordingId] = useState<string>('clarification-questions');
+  // Load any previously saved customizations and preserve all user additions, replacements, and deletions permanently
+  const initialPersistedRef = useRef(loadLocalPersistedState());
 
-  // Clarification Questions Recording (07:26) state
+  const [deletedIds, setDeletedIds] = useState<string[]>(
+    () => initialPersistedRef.current?.deletedIds || []
+  );
+  const [bgCycleIntervalSec, setBgCycleIntervalSec] = useState<number>(
+    () => initialPersistedRef.current?.bgCycleIntervalSec || 4
+  );
+  const [customBgUrls, setCustomBgUrls] = useState<string[]>(
+    () => initialPersistedRef.current?.customBgUrls || []
+  );
+
+  // Approved Recording Switcher state (All 9 unique studio recordings + user-uploaded audio tracks)
+  const [audioRecordings, setAudioRecordings] = useState<ApprovedAudioRecording[]>(() => {
+    const savedRecs = initialPersistedRef.current?.audioRecordings;
+    const delSet = new Set(initialPersistedRef.current?.deletedIds || []);
+    if (Array.isArray(savedRecs) && savedRecs.length > 0) {
+      const cleanedSaved = savedRecs.filter((r) => r && r.id !== 'main-dossier' && !delSet.has(r.id));
+      const savedIds = new Set(cleanedSaved.map((r) => r.id));
+      const missingDefaults = APPROVED_AUDIO_RECORDINGS.filter(
+        (r) => !savedIds.has(r.id) && !delSet.has(r.id)
+      );
+      if (missingDefaults.length > 0) {
+        return [...missingDefaults, ...cleanedSaved]
+          .filter((r) => !delSet.has(r.id))
+          .map((item, idx) => ({
+            ...item,
+            order: idx + 1,
+          }));
+      }
+      return cleanedSaved;
+    }
+    return APPROVED_AUDIO_RECORDINGS;
+  });
+  const [selectedApprovedRecordingId, setSelectedApprovedRecordingId] = useState<string>('rec-00-opening-xp');
+  const studioTrackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [studioTrackSrc, setStudioTrackSrc] = useState<string>('/audio/rec-00-opening-xp.mp3');
+  const [isStudioTrackPlaying, setIsStudioTrackPlaying] = useState<boolean>(false);
+  const [studioTrackTime, setStudioTrackTime] = useState<number>(0);
+  const [studioTrackDuration, setStudioTrackDuration] = useState<number>(30.0);
+  const autoChainAllRecordingsRef = useRef<boolean>(true);
+  const addAudioInputRef = useRef<HTMLInputElement | null>(null);
+  const replaceAudioInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Clarification Questions Recording (06:45) state
   const [clarificationAudioSrc, setClarificationAudioSrc] = useState<string>(CLARIFICATION_QUESTIONS_AUDIO_URL);
   const [isClarificationPlaying, setIsClarificationPlaying] = useState<boolean>(false);
   const [clarificationTime, setClarificationTime] = useState<number>(0);
-  const [clarificationDuration, setClarificationDuration] = useState<number>(418.0);
+  const [clarificationDuration, setClarificationDuration] = useState<number>(405.5);
 
   // Executive Summary & Final Appeal Recording (03:46) state + Companion Visual Frame sizing state
   const [isExecAppealPlaying, setIsExecAppealPlaying] = useState<boolean>(false);
@@ -287,32 +333,16 @@ export default function App() {
   const [playingEvidenceId, setPlayingEvidenceId] = useState<string | null>(null);
   const evidenceVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
 
-  // Load any previously saved customizations, ensuring the 7 Conversation Evidence Videos ("دلائل المحادثات") are always present in order
-  const initialPersistedRef = useRef(loadLocalPersistedState());
-
   const [fieldVideos, setFieldVideos] = useState<FieldVideoItem[]>(() => {
     const savedVids = initialPersistedRef.current?.fieldVideos;
-    if (
-      Array.isArray(savedVids) &&
-      savedVids.length === FIELD_VIDEOS.length &&
-      savedVids[0]?.id === 'conv-evidence-1' &&
-      savedVids[0]?.url === FIELD_VIDEOS[0].url
-    ) {
-      return savedVids.map((v, idx) => {
-        const canonical = FIELD_VIDEOS[idx];
-        if (canonical && v.id === canonical.id && !v.url.startsWith('blob:') && !v.url.startsWith('/user_uploads/')) {
-          return canonical;
-        }
-        return v;
-      });
+    if (Array.isArray(savedVids) && savedVids.length > 0) {
+      return savedVids;
     }
     return FIELD_VIDEOS;
   });
 
-  // Interactive Section-Based + Multi-Scene Background state
-  const [bgVideoUrl, setBgVideoUrl] = useState<string>(
-    () => BACKGROUND_SCENE_VIDEOS[0].url
-  );
+  // Interactive Section-Based + Multi-Scene Background state (empty bgVideoUrl so allBgVideoUrls[bgSceneIndex] rotates continuously)
+  const [bgVideoUrl, setBgVideoUrl] = useState<string>('');
   const [autoCycleBgScenes, setAutoCycleBgScenes] = useState<boolean>(true);
   const [bgSceneIndex, setBgSceneIndex] = useState<number>(0);
   const [activeVisibleSectionId, setActiveVisibleSectionId] = useState<string>('hero-section');
@@ -341,8 +371,14 @@ export default function App() {
   const changeBgStudioInputRef = useRef<HTMLInputElement | null>(null);
   const replaceOpeningStudioInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Top 6 Showcase Slots (Photos)
-  const [fleetPhotos, setFleetPhotos] = useState<TopShowcaseItem[]>(() => FLEET_PHOTOS);
+  // Top Showcase Slots (All Warehouse & Truck Videos + Fleet Photos)
+  const [fleetPhotos, setFleetPhotos] = useState<TopShowcaseItem[]>(() => {
+    const savedFleet = initialPersistedRef.current?.fleetPhotos;
+    if (Array.isArray(savedFleet) && savedFleet.length > 0) {
+      return savedFleet;
+    }
+    return FLEET_PHOTOS;
+  });
   const [selectedFleetIdx, setSelectedFleetIdx] = useState(0);
   const [isShowcaseExpanded, setIsShowcaseExpanded] = useState(false);
   const [isDraggingShowcase, setIsDraggingShowcase] = useState(false);
@@ -350,14 +386,19 @@ export default function App() {
   const [showLogoLightbox, setShowLogoLightbox] = useState(false);
   const replaceFleetPhotoInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Documents, PDF, Videos & Presentations Library state
-  const [documents, setDocuments] = useState<DocumentItem[]>(
-    () =>
-      initialPersistedRef.current?.documents &&
-      initialPersistedRef.current.documents.length > 0
-        ? initialPersistedRef.current.documents
-        : INITIAL_DOCUMENTS
-  );
+  // Documents, PDF, Videos & Presentations Library state (always merging the 4 default PDF presentations)
+  const [documents, setDocuments] = useState<DocumentItem[]>(() => {
+    const savedDocs = initialPersistedRef.current?.documents;
+    const delSet = new Set(initialPersistedRef.current?.deletedIds || []);
+    if (Array.isArray(savedDocs) && savedDocs.length > 0) {
+      const existingIds = new Set(savedDocs.map((d) => d.id));
+      const missingPdfs = INITIAL_DOCUMENTS.filter(
+        (defDoc) => !existingIds.has(defDoc.id) && !delSet.has(defDoc.id)
+      );
+      return [...missingPdfs, ...savedDocs.filter((d) => !delSet.has(d.id))];
+    }
+    return INITIAL_DOCUMENTS;
+  });
   const [selectedDoc, setSelectedDoc] = useState<DocumentItem | null>(null);
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [showUploadPanel, setShowUploadPanel] = useState(false);
@@ -371,7 +412,86 @@ export default function App() {
   const userModifiedMediaRef = useRef<boolean>(false);
   const isHydratingStateRef = useRef<boolean>(true);
 
-  // Sync from server / IndexedDB on mount without overwriting the 7 Conversation Evidence Videos
+  // Regulatory Headlines (Google Search Grounding) & Auto-Saved Modification Log
+  const [regulatoryHeadlines, setRegulatoryHeadlines] = useState<
+    {
+      title: string;
+      source: string;
+      date: string;
+      summary: string;
+      url: string;
+      tag: string;
+    }[]
+  >([
+    {
+      title:
+        'وزارة التجارة والصناعة وترويج الاستثمار: تمكين الصادرات العُمانية غير النفطية أولوية استراتيجية في رؤية عُمان 2040',
+      source: 'البوابة الرسمية لوزارة التجارة والصناعة وترويج الاستثمار · سلطنة عُمان',
+      date: 'تحديث تنظيمي مستمر · 2026',
+      summary:
+        'تؤكد السياسات التنفيذية لرؤية عُمان 2040 على إزالة كافة العوائق الإدارية والفنية أمام المصدرين الوطنيين، وتسهيل نفاذ المنتجات العُمانية غير النفطية إلى الأسواق الخليجية والإقليمية وفق أعلى معايير المطابقة القياسية.',
+      url: 'https://www.tejarah.gov.om',
+      tag: 'التنويع الاقتصادي ورؤية 2040',
+    },
+    {
+      title:
+        'مركز حماية المنافسة ومنع الاحتكار: الرقابة الصارمة على الممارسات المقيدة للمنافسة والامتناع الضمني عن التعامل',
+      source: 'مركز حماية المنافسة ومنع الاحتكار · المرسوم السلطاني رقم 67 لسنة 2014',
+      date: 'إطار تشريعي ورقابي نافذ',
+      summary:
+        'يحظر قانون حماية المنافسة ومنع الاحتكار الصادر بالمرسوم السلطاني رقم 67 لسنة 2014 (المادتان 9 و10) أي ممارسات تخل بالمنافسة العادلة أو تفرض شروطاً تعسفية أو تحجب المستندات الأساسية اللازمة لنفاذ السلع التصديرية للناقل والمستثمر الوطني.',
+      url: 'https://www.tejarah.gov.om',
+      tag: 'حماية المنافسة ومنع الاحتكار',
+    },
+    {
+      title:
+        'تكامل سلاسل الإمداد والأمن الغذائي الخليجي واشتراطات المطابقة المخبرية والبيطرية عبر المنافذ البرية',
+      source: 'منظومة المواصفات والمطابقة الخليجية ووزارة التغير المناخي والبيئة',
+      date: 'اللوائح الفنية المعتمدة · 2026',
+      summary:
+        'تستلزم لوائح الاستيراد والتصدير للأعلاف والمنتجات الزراعية تطابقاً تاماً بين شهادات التحليل المخبري (COA) المعتمدة وفق معيار ISO 17025 والبطاقات التعريفية للمنتج مع توثيق فترات السحب لضمان انسياب الشحنات عبر المنافذ دون تأخير.',
+      url: 'https://www.oman2040.om',
+      tag: 'المطابقة الفنية وسلاسل الإمداد',
+    },
+  ]);
+  const [isLoadingHeadlines, setIsLoadingHeadlines] = useState<boolean>(false);
+  const [modificationLogs, setModificationLogs] = useState<
+    { id: string; action: string; detail: string; time: string }[]
+  >([
+    {
+      id: 'init-log-1',
+      action: 'فحص البصمة الصوتية وترتيب التسجيلات',
+      detail:
+        'تم ترتيب التسجيلات الـ 8 زمنياً من المقدمة إلى الخاتمة وحذف النسخ المكررة المطابقة بالبصمة الصوتية (MD5) مع الحفاظ على بيانات التعريف.',
+      time: 'مفعل تلقائياً',
+    },
+    {
+      id: 'init-log-2',
+      action: 'تنقيح النصوص والمقاطع الصوتية',
+      detail:
+        'تمت إزالة كافة الشرطات والرموز غير المعتمدة واستبعاد أي إشارة لتزويد الوسيط الأجنبي بمعلومات العميل النهائي وحصر الأرقام المالية في المقدمة.',
+      time: 'مفعل تلقائياً',
+    },
+  ]);
+
+  const fetchGroundedRegulatoryHeadlines = async () => {
+    setIsLoadingHeadlines(true);
+    try {
+      const res = await fetch('/api/regulatory-headlines?refresh=true');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.headlines) && data.headlines.length > 0) {
+          setRegulatoryHeadlines(data.headlines);
+        }
+      }
+    } catch {
+      // Keep resilient default headlines
+    } finally {
+      setIsLoadingHeadlines(false);
+    }
+  };
+
+  // Sync from server / IndexedDB on mount while preserving all user customizations
   useEffect(() => {
     let active = true;
     (async () => {
@@ -381,27 +501,32 @@ export default function App() {
         return;
       }
       if (saved) {
-        if (
-          Array.isArray(saved.fieldVideos) &&
-          saved.fieldVideos.length === FIELD_VIDEOS.length &&
-          saved.fieldVideos[0]?.id === 'conv-evidence-1'
-        ) {
+        if (Array.isArray(saved.fieldVideos) && saved.fieldVideos.length > 0) {
           const hydratedVideos = await Promise.all(
-            saved.fieldVideos.map(async (v, idx) => {
-              if (v.url.startsWith('blob:')) {
+            saved.fieldVideos.map(async (v) => {
+              if (v.url && v.url.startsWith('blob:')) {
                 const restored = await loadBlobUrlFromIndexedDB(`media_vid_${v.id}`);
                 if (restored) return { ...v, url: restored };
-              }
-              const canonical = FIELD_VIDEOS[idx];
-              if (canonical && v.id === canonical.id && !v.url.startsWith('blob:') && !v.url.startsWith('/user_uploads/')) {
-                return canonical;
               }
               return v;
             })
           );
           if (active && !userModifiedMediaRef.current) setFieldVideos(hydratedVideos);
         }
+        if (Array.isArray(saved.fleetPhotos) && saved.fleetPhotos.length > 0) {
+          const hydratedPhotos = await Promise.all(
+            saved.fleetPhotos.map(async (p, idx) => {
+              if (p.url && p.url.startsWith('blob:')) {
+                const restored = await loadBlobUrlFromIndexedDB(`media_slot_${idx}`);
+                if (restored) return { ...p, url: restored };
+              }
+              return p;
+            })
+          );
+          if (active && !userModifiedMediaRef.current) setFleetPhotos(hydratedPhotos);
+        }
         if (Array.isArray(saved.documents) && saved.documents.length > 0) {
+          const delSet = new Set(saved.deletedIds || []);
           const hydratedDocs = await Promise.all(
             saved.documents.map(async (doc) => {
               if (doc.fileUrl && doc.fileUrl.startsWith('blob:')) {
@@ -411,7 +536,50 @@ export default function App() {
               return doc;
             })
           );
-          if (active && !userModifiedMediaRef.current) setDocuments(hydratedDocs);
+          const existingIds = new Set(hydratedDocs.map((d) => d.id));
+          const missingDefaultDocs = INITIAL_DOCUMENTS.filter(
+            (defDoc) => !existingIds.has(defDoc.id) && !delSet.has(defDoc.id)
+          );
+          if (active && !userModifiedMediaRef.current) {
+            setDocuments([...missingDefaultDocs, ...hydratedDocs.filter((d) => !delSet.has(d.id))]);
+          }
+        }
+        if (Array.isArray(saved.deletedIds)) {
+          if (active && !userModifiedMediaRef.current) setDeletedIds(saved.deletedIds);
+        }
+        if (typeof saved.bgCycleIntervalSec === 'number' && saved.bgCycleIntervalSec >= 2) {
+          if (active && !userModifiedMediaRef.current) setBgCycleIntervalSec(saved.bgCycleIntervalSec);
+        }
+        if (Array.isArray(saved.customBgUrls) && saved.customBgUrls.length > 0) {
+          if (active && !userModifiedMediaRef.current) setCustomBgUrls(saved.customBgUrls);
+        }
+        if (Array.isArray(saved.audioRecordings) && saved.audioRecordings.length > 0) {
+          const delSet = new Set(saved.deletedIds || []);
+          const hydratedRecs = (
+            await Promise.all(
+              saved.audioRecordings.map(async (rec) => {
+                if (rec.url && rec.url.startsWith('blob:')) {
+                  const restored = await loadBlobUrlFromIndexedDB(`media_aud_${rec.id}`);
+                  if (restored) return { ...rec, url: restored };
+                }
+                return rec;
+              })
+            )
+          ).filter((r) => r && r.id !== 'main-dossier' && !delSet.has(r.id));
+          const savedIds = new Set(hydratedRecs.map((r) => r.id));
+          const missingDefaults = APPROVED_AUDIO_RECORDINGS.filter(
+            (r) => !savedIds.has(r.id) && !delSet.has(r.id)
+          );
+          const mergedRecs =
+            missingDefaults.length > 0
+              ? [...missingDefaults, ...hydratedRecs]
+                  .filter((r) => !delSet.has(r.id))
+                  .map((item, idx) => ({
+                    ...item,
+                    order: idx + 1,
+                  }))
+              : hydratedRecs;
+          if (active && !userModifiedMediaRef.current) setAudioRecordings(mergedRecs);
         }
       }
       isHydratingStateRef.current = false;
@@ -421,7 +589,7 @@ export default function App() {
     };
   }, []);
 
-  // Automatically save state permanently
+  // Automatically save state permanently whenever any media, sizing, or deletion changes
   useEffect(() => {
     if (isHydratingStateRef.current && !userModifiedMediaRef.current) return;
     savePermanentDossierState({
@@ -429,15 +597,39 @@ export default function App() {
       bgVideoUrl,
       fleetPhotos,
       documents,
+      audioRecordings,
+      deletedIds,
+      bgCycleIntervalSec,
+      customBgUrls,
     });
-  }, [fieldVideos, bgVideoUrl, fleetPhotos, documents]);
+  }, [
+    fieldVideos,
+    bgVideoUrl,
+    fleetPhotos,
+    documents,
+    audioRecordings,
+    deletedIds,
+    bgCycleIntervalSec,
+    customBgUrls,
+  ]);
 
-  // All background video URLs (exclusively from BACKGROUND_SCENE_VIDEOS — never the foreground Conversation Evidence videos)
+  // All warehouse & truck background video URLs rotating one after another (including the 8 new warehouse/truck videos + any uploaded warehouse videos)
   const allBgVideoUrls = React.useMemo(() => {
-    return BACKGROUND_SCENE_VIDEOS.map((b) => b.url);
-  }, []);
+    const urls: string[] = [];
+    const addUnique = (u?: string) => {
+      if (u && !urls.includes(u) && !deletedIds.includes(u)) {
+        urls.push(u);
+      }
+    };
+    customBgUrls.forEach(addUnique);
+    BACKGROUND_SCENE_VIDEOS.forEach((b) => addUnique(b.url));
+    fleetPhotos.forEach((p) => {
+      if (p.mediaType === 'video') addUnique(p.url);
+    });
+    return urls.length > 0 ? urls : BACKGROUND_SCENE_VIDEOS.map((b) => b.url);
+  }, [customBgUrls, fleetPhotos, deletedIds]);
 
-  // Observe which section of the presentation is currently in view and switch background scene accordingly ("وعلى حسب الأقسام")
+  // Observe which section of the presentation is currently in view and advance the interactive background scene
   useEffect(() => {
     if (!isAuthenticated || typeof IntersectionObserver === 'undefined') return;
 
@@ -462,17 +654,13 @@ export default function App() {
         entries.forEach((entry) => {
           if (entry.isIntersecting && entry.target.id) {
             setActiveVisibleSectionId(entry.target.id);
-            const matchedIdx = BACKGROUND_SCENE_VIDEOS.findIndex(
-              (s) => s.sectionKey === entry.target.id
-            );
-            if (matchedIdx !== -1) {
-              setBgSceneIndex(matchedIdx);
-              setBgVideoUrl(BACKGROUND_SCENE_VIDEOS[matchedIdx].url);
+            if (autoCycleBgScenes && allBgVideoUrls.length > 1) {
+              setBgSceneIndex((prev) => (prev + 1) % allBgVideoUrls.length);
             }
           }
         });
       },
-      { threshold: 0.25, rootMargin: '-10% 0px -25% 0px' }
+      { threshold: 0.35, rootMargin: '-10% 0px -25% 0px' }
     );
 
     sectionIds.forEach((id) => {
@@ -481,23 +669,24 @@ export default function App() {
     });
 
     return () => observer.disconnect();
-  }, [isAuthenticated, viewMode]);
+  }, [isAuthenticated, viewMode, autoCycleBgScenes, allBgVideoUrls.length]);
 
-  // Also cycle background scenes interactively every 6 seconds while browsing ("واجعل الخلفية تفاعلية كل مرة مشهد وعلى حسب الأقسام")
+  // Rotate warehouse & truck background videos sequentially one after another every few seconds ("تتبادل كل ثواني تتبدل واحدة تلو واحدة")
   useEffect(() => {
     if (!autoCycleBgScenes || allBgVideoUrls.length <= 1) return;
+    const intervalMs = Math.max(2500, bgCycleIntervalSec * 1000);
     const interval = window.setInterval(() => {
       setBgSceneIndex((prev) => (prev + 1) % allBgVideoUrls.length);
-    }, 6000);
+    }, intervalMs);
     return () => window.clearInterval(interval);
-  }, [autoCycleBgScenes, allBgVideoUrls.length]);
+  }, [autoCycleBgScenes, allBgVideoUrls.length, bgCycleIntervalSec]);
 
   const activeBackgroundScene =
     BACKGROUND_SCENE_VIDEOS[bgSceneIndex % BACKGROUND_SCENE_VIDEOS.length] ||
     BACKGROUND_SCENE_VIDEOS[0];
 
   const activeBackgroundVideoUrl = autoCycleBgScenes
-    ? activeBackgroundScene.url
+    ? allBgVideoUrls[bgSceneIndex % allBgVideoUrls.length] || activeBackgroundScene.url
     : bgVideoUrl;
 
   // 30-second countdown for the Fullscreen Opening Video, then auto-return to main screen & start synced presentation
@@ -690,12 +879,16 @@ export default function App() {
     setIsFullPresentationPlaying(false);
     setIsExecAppealPlaying(false);
     setIsClarificationPlaying(false);
+    setIsStudioTrackPlaying(false);
     setActiveAudioId(null);
     setActiveChapterIndex(null);
     setIsLoadingAudio(null);
 
     if (mainAudioRef.current) {
       mainAudioRef.current.pause();
+    }
+    if (studioTrackAudioRef.current) {
+      studioTrackAudioRef.current.pause();
     }
     if (section3AudioRef.current) {
       section3AudioRef.current.pause();
@@ -713,6 +906,167 @@ export default function App() {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
+  };
+
+  // Play ANY of the 10 approved or user-uploaded audio recordings directly from its actual MP3 file
+  const playApprovedRecordingItem = async (
+    recIdOrObj: string | ApprovedAudioRecording,
+    autoChain = true,
+    scrollToTarget = true
+  ) => {
+    const rec =
+      typeof recIdOrObj === 'string'
+        ? audioRecordings.find((r) => r.id === recIdOrObj) || audioRecordings[0]
+        : recIdOrObj;
+    if (!rec) return;
+
+    // Toggle pause if already playing this exact recording
+    const isAlreadyPlayingThis =
+      (rec.id === 'clarification-questions' && isClarificationPlaying) ||
+      (rec.id === 'executive-appeal' && isExecAppealPlaying) ||
+      (rec.id === 'main-dossier' && isFullPresentationPlaying) ||
+      (isStudioTrackPlaying && activeAudioId === rec.id);
+
+    if (isAlreadyPlayingThis) {
+      stopAllAudio();
+      return;
+    }
+
+    autoChainAllRecordingsRef.current = autoChain;
+    setSelectedApprovedRecordingId(rec.id);
+
+    if (rec.id === 'clarification-questions') {
+      playClarificationQuestions(0, null, 'clarification-full', scrollToTarget);
+      return;
+    }
+    if (rec.id === 'executive-appeal') {
+      playExecutiveAppeal(0, null, 'exec-appeal-full', scrollToTarget);
+      return;
+    }
+    if (rec.id === 'main-dossier') {
+      stopAllAudio();
+      setSelectedApprovedRecordingId('main-dossier');
+      playElevenLabsSegment('hero', 0, null, 0, true);
+      return;
+    }
+
+    // Play the dedicated individual studio MP3 file (rec-00-opening-xp, rec-01-intro, rec-03-commitment, rec-04-noufal, rec-06-coa, rec-05-legal, rec-07-accountability, or custom uploaded MP3)
+    stopAllAudio();
+    pauseAllEvidenceVideos();
+    setSelectedApprovedRecordingId(rec.id);
+    setActiveAudioId(rec.id);
+    setIsStudioTrackPlaying(true);
+    setIsGradualAutoScroll(true);
+
+    if (scrollToTarget && rec.targetSectionId) {
+      const targetEl = document.getElementById(rec.targetSectionId);
+      if (targetEl) {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+    const trackEl = studioTrackAudioRef.current;
+    if (!trackEl) return;
+
+    try {
+      if (studioTrackSrc !== rec.url) {
+        setStudioTrackSrc(rec.url);
+      }
+      trackEl.src = rec.url;
+      trackEl.currentTime = 0;
+      setStudioTrackTime(0);
+      smoothFadeInAudio(trackEl);
+      await trackEl.play();
+    } catch {
+      if (rec.fallbackUrl && trackEl.src !== rec.fallbackUrl) {
+        trackEl.src = rec.fallbackUrl;
+        trackEl.play().catch(() => {});
+      }
+    }
+  };
+
+  // Upload and add a new audio recording permanently to the studio playlist
+  const handleAddAudioRecording = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const fileArray: File[] = Array.from(files);
+    e.target.value = '';
+
+    userModifiedMediaRef.current = true;
+    isHydratingStateRef.current = false;
+
+    fileArray.forEach((file: File, idx: number) => {
+      const tempBlobUrl = URL.createObjectURL(file);
+      const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_—/\\-]+/g, ' ').trim();
+      const newRecId = `rec-custom-${Date.now()}-${idx}`;
+      const nextOrderNum = audioRecordings.length + idx + 1;
+
+      const newRec: ApprovedAudioRecording = {
+        id: newRecId,
+        badge: `${nextOrderNum}. ${cleanName.slice(0, 28)}`,
+        title: `التسجيل (${nextOrderNum}): ${cleanName}`,
+        shortTitle: `${nextOrderNum}. ${cleanName.slice(0, 22)}`,
+        durationLabel: 'ملف صوتي مرفوع',
+        url: tempBlobUrl,
+        targetSectionId: 'section-clarification-questions',
+        description: `تسجيل صوتي مرفوع ومثبت بشكل دائم في قائمة التسجيلات المعتمدة (${cleanName}).`,
+        skipRanges: [],
+      };
+
+      setAudioRecordings((prev) => [...prev, newRec]);
+      setSelectedApprovedRecordingId(newRecId);
+
+      persistUploadedMediaFile(file, `aud_${newRecId}`).then(({ permanentUrl }) => {
+        setAudioRecordings((prev) =>
+          prev.map((r) => (r.id === newRecId ? { ...r, url: permanentUrl } : r))
+        );
+      });
+    });
+
+    showToast(
+      'success',
+      'تم رفع وإضافة التسجيل الصوتي بنجاح',
+      `تمت إضافة ${fileArray.length} تسجيل صوتي إلى قائمة التسجيلات الرسمية وحفظه بشكل دائم.`
+    );
+  };
+
+  // Replace the currently selected audio recording permanently
+  const handleReplaceAudioRecording = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    userModifiedMediaRef.current = true;
+    isHydratingStateRef.current = false;
+
+    const targetId = selectedApprovedRecordingId || audioRecordings[0]?.id;
+    const tempBlobUrl = URL.createObjectURL(file);
+    const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_—/\\-]+/g, ' ').trim();
+
+    setAudioRecordings((prev) =>
+      prev.map((rec, idx) =>
+        rec.id === targetId
+          ? {
+              ...rec,
+              url: tempBlobUrl,
+              badge: `${idx + 1}. ${cleanName.slice(0, 28)}`,
+              title: `التسجيل (${idx + 1}): ${cleanName}`,
+            }
+          : rec
+      )
+    );
+
+    persistUploadedMediaFile(file, `aud_${targetId}`).then(({ permanentUrl }) => {
+      setAudioRecordings((prev) =>
+        prev.map((rec) => (rec.id === targetId ? { ...rec, url: permanentUrl } : rec))
+      );
+    });
+
+    showToast(
+      'success',
+      'تم استبدال التسجيل الصوتي وحفظه بشكل دائم',
+      `تم تحديث التسجيل الصوتي بالملف «${cleanName}» وحفظه نهائياً.`
+    );
   };
 
   // Play the dedicated 12 Clarification Questions Recording (07:26) right after the Title and Introduction
@@ -911,7 +1265,6 @@ export default function App() {
     );
     if (execBgIdx !== -1) {
       setBgSceneIndex(execBgIdx);
-      setBgVideoUrl(BACKGROUND_SCENE_VIDEOS[execBgIdx].url);
     }
 
     if (scrollToSection) {
@@ -1109,35 +1462,11 @@ export default function App() {
       // Ignore AudioContext errors
     }
 
-    // After chime finishes (700ms), speak brief non-overlapping transition cue if speechSynthesis is available
+    // Smooth natural pause (420ms) after the soft chime so the next human recording starts seamlessly without robotic speechSynthesis interruption
     window.setTimeout(() => {
-      if ('speechSynthesis' in window) {
-        try {
-          const cueUtterance = new SpeechSynthesisUtterance(
-            `ننتقل الآن إلى ${nextLabel}`
-          );
-          cueUtterance.lang = 'ar-SA';
-          cueUtterance.rate = 1.0;
-          let finished = false;
-          const finishTransition = () => {
-            if (finished) return;
-            finished = true;
-            isTransitionCuePlayingRef.current = false;
-            if (onComplete) onComplete();
-          };
-          cueUtterance.onend = finishTransition;
-          cueUtterance.onerror = finishTransition;
-          window.speechSynthesis.speak(cueUtterance);
-          // Safety timeout in case browser speechSynthesis hangs
-          window.setTimeout(finishTransition, 3200);
-          return;
-        } catch {
-          // Fall through
-        }
-      }
       isTransitionCuePlayingRef.current = false;
       if (onComplete) onComplete();
-    }, 700);
+    }, 420);
   };
 
   // Play from the unified studio-mastered audio file seamlessly
@@ -1203,7 +1532,6 @@ export default function App() {
       const matchedBgIdx = BACKGROUND_SCENE_VIDEOS.findIndex((s) => s.sectionKey === domSecId);
       if (matchedBgIdx !== -1) {
         setBgSceneIndex(matchedBgIdx);
-        setBgVideoUrl(BACKGROUND_SCENE_VIDEOS[matchedBgIdx].url);
       }
     }
 
@@ -1313,7 +1641,6 @@ export default function App() {
         const matchedBgIdx = BACKGROUND_SCENE_VIDEOS.findIndex((s) => s.sectionKey === domId);
         if (matchedBgIdx !== -1) {
           setBgSceneIndex(matchedBgIdx);
-          setBgVideoUrl(BACKGROUND_SCENE_VIDEOS[matchedBgIdx].url);
         }
 
         if (
@@ -1574,8 +1901,9 @@ export default function App() {
       }
 
       const fileUrl = URL.createObjectURL(file);
-      const cleanName =
+      const rawCleanName =
         customPdfTitle.trim() || file.name.replace(/\.[a-z0-9]+$/i, '');
+      const cleanName = rawCleanName.replace(/[_—/\\-]+/g, ' ').trim();
       const formattedSize =
         file.size > 1024 * 1024
           ? `${(file.size / (1024 * 1024)).toFixed(2)} MB`
@@ -1607,12 +1935,15 @@ export default function App() {
         description:
           customPdfDesc.trim() ||
           (isVideo
-            ? `تسجيل مرئي (فيديو MP4 - ${formattedSize}) مدرج كدليل ومرفق رسمي ضمن سجل الوقائع والعمليات الميدانية لشركة بن كليلة العامري للتجارة والاستثمار.`
+            ? `تسجيل مرئي (فيديو MP4 بحجم ${formattedSize}) مدرج كدليل ومرفق رسمي ضمن سجل الوقائع والعمليات الميدانية لشركة بن كليلة العامري للتجارة والاستثمار.`
             : isImage
             ? `صورة توثيقية (${formattedSize}) مدرجة كدليل ومرفق رسمي ضمن سجل الوقائع والمطابقة المستندية.`
-            : `مستند رسمي وعرض مقبول ومعالج مباشرة في النظام (${formattedSize}) دون اشتراط تحويله إلى تسجيل صوتي — متاح للاستعراض والبحث التحليلي والطباعة.`),
+            : `مستند رسمي وعرض مقبول ومعالج مباشرة في النظام (${formattedSize}) دون اشتراط تحويله إلى تسجيل صوتي، متاح للاستعراض والبحث التحليلي والطباعة.`),
         fileUrl,
-        previewUrl: isVideo || isImage ? fileUrl : FALLBACK_SAFE_VIDEO_URLS[0],
+        previewUrl:
+          isVideo || isImage
+            ? fileUrl
+            : '/user_uploads/media_doc_doc-uploaded-1793171909555-8olc.jpg',
         fileSizeFormatted: formattedSize,
         scale: 100,
         heightMode: 'md',
@@ -1625,10 +1956,10 @@ export default function App() {
             pageNumber: 1,
             title: cleanName,
             subtitle:
-              'دليل ومرفق رسمي مدرج في سجل المتابعة الرقابية | ملف المراجع: الفاضل خالد المسروري',
-            referenceCode: `EVID-${new Date().getFullYear()}`,
+              'دليل ومرفق رسمي مدرج في سجل المتابعة الرقابية | ملف المراجع أستاذ خالد المسروري',
+            referenceCode: `EVID${new Date().getFullYear()}`,
             content: [
-              `اسم الملف المرفق: ${file.name} (${formattedSize})`,
+              `اسم الملف المرفق: ${cleanName} (${formattedSize})`,
               isVideo
                 ? 'تم إدراج هذا الفيديو القصير كدليل مرئي رسمي قابل للتشغيل المباشر بالصوت والصورة أو تعيينه كخلفية تفاعلية للعرض.'
                 : isImage
@@ -1651,13 +1982,25 @@ export default function App() {
       setCustomPdfDesc('');
       setShowUploadPanel(false);
 
+      setModificationLogs((prev) => [
+        {
+          id: `doc-add-${Date.now()}`,
+          action: 'إضافة مرفق أو مستند PDF',
+          detail: `تم إدراج ${
+            docsOnly.length === 1 ? `«${docsOnly[0].title}»` : `${docsOnly.length} مرفقات رسمية`
+          } وحفظها تلقائياً بشكل دائم.`,
+          time: new Date().toLocaleTimeString('ar-OM', { hour: '2-digit', minute: '2-digit' }),
+        },
+        ...prev,
+      ]);
+
       const chimePlayed = playSoftUploadChime();
       showToast(
         'success',
-        'تم إدراج المرفق والدليل الرسمي بنجاح',
+        'تم إدراج المرفق وحفظه تلقائياً',
         `تم قبول وإدراج ${
           docsOnly.length === 1 ? `«${docsOnly[0].title}»` : `${docsOnly.length} ملفات ومرفقات`
-        } مباشرة في العرض مع خيارات التكبير وتغيير الحجم${
+        } مباشرة في العرض وحفظها بشكل دائم${
           !chimePlayed ? ' (مع كتم التنبيه الصوتي لعدم مقاطعة الجلسة الجارية).' : '.'
         }`
       );
@@ -1698,25 +2041,46 @@ export default function App() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  fileName: file.name,
+                  fileName: file.name.replace(/[_—/\\-]+/g, ' '),
                   fileSizeFormatted: doc.fileSizeFormatted,
+                  base64Pdf: base64Data,
                   pdfBase64: base64Data,
                 }),
               });
 
               if (res.ok) {
                 const processed = await res.json();
+                const cleanedTitle = String(processed.title || doc.title)
+                  .replace(/[_—/\\-]+/g, ' ')
+                  .trim();
+                const cleanedDesc = String(
+                  processed.description || processed.summary || doc.description
+                )
+                  .replace(/[_—]/g, ' ')
+                  .trim();
                 setDocuments((prev) =>
                   prev.map((d) =>
                     d.id === doc.id
                       ? {
                           ...d,
                           isProcessing: false,
+                          title: cleanedTitle,
                           badge: processed.badge || d.badge,
-                          description: processed.summary || d.description,
+                          description: cleanedDesc,
                           pages:
                             Array.isArray(processed.pages) && processed.pages.length > 0
-                              ? processed.pages
+                              ? processed.pages.map((pg: any, idx: number) => ({
+                                  pageNumber: pg.pageNumber || idx + 1,
+                                  title: String(pg.title || cleanedTitle).replace(/[_—]/g, ' '),
+                                  subtitle: String(pg.subtitle || 'مستند PDF رسمي معتمد').replace(
+                                    /[_—]/g,
+                                    ' '
+                                  ),
+                                  referenceCode: 'PDF2026',
+                                  content: Array.isArray(pg.content)
+                                    ? pg.content.map((c: any) => String(c).replace(/[_—]/g, ' '))
+                                    : [cleanedDesc],
+                                }))
                               : d.pages,
                         }
                       : d
@@ -1727,11 +2091,23 @@ export default function App() {
                     ? {
                         ...curr,
                         isProcessing: false,
+                        title: cleanedTitle,
                         badge: processed.badge || curr.badge,
-                        description: processed.summary || curr.description,
+                        description: cleanedDesc,
                         pages:
                           Array.isArray(processed.pages) && processed.pages.length > 0
-                            ? processed.pages
+                            ? processed.pages.map((pg: any, idx: number) => ({
+                                pageNumber: pg.pageNumber || idx + 1,
+                                title: String(pg.title || cleanedTitle).replace(/[_—]/g, ' '),
+                                subtitle: String(pg.subtitle || 'مستند PDF رسمي معتمد').replace(
+                                  /[_—]/g,
+                                  ' '
+                                ),
+                                referenceCode: 'PDF2026',
+                                content: Array.isArray(pg.content)
+                                  ? pg.content.map((c: any) => String(c).replace(/[_—]/g, ' '))
+                                  : [cleanedDesc],
+                              }))
                             : curr.pages,
                       }
                     : curr
@@ -1758,18 +2134,35 @@ export default function App() {
   };
 
   const handleRemoveUploadedDoc = (docId: string, docTitle: string) => {
+    userModifiedMediaRef.current = true;
+    isHydratingStateRef.current = false;
+    setDeletedIds((prev) => (prev.includes(docId) ? prev : [...prev, docId]));
     setDocuments((prev) => prev.filter((d) => d.id !== docId));
     if (selectedDoc?.id === docId) {
       setSelectedDoc(null);
     }
-    showToast('info', 'تمت إزالة الدليل / المرفق', `تم حذف «${docTitle}» من مكتبة الأدلة والمرفقات.`);
+    setModificationLogs((prev) => [
+      {
+        id: `doc-del-${Date.now()}`,
+        action: 'حذف مرفق أو دليل',
+        detail: `تم حذف المرفق «${docTitle}» نهائياً من مكتبة الأدلة وحفظ التعديل تلقائياً.`,
+        time: new Date().toLocaleTimeString('ar-OM', { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...prev,
+    ]);
+    showToast(
+      'info',
+      'تم حذف المرفق وحفظ التعديل تلقائياً',
+      `تم حذف «${docTitle}» نهائياً من مكتبة الأدلة والمرفقات ولن يعود عند تحديث الصفحة.`
+    );
   };
 
   // Replace a specific Evidence / Document Card directly from Studio/Device
   const handleReplaceDocFromStudio = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file || !replacingDocId) return;
+    const targetDocId = replacingDocId || studioPickerTarget?.id;
+    if (!file || !targetDocId) return;
 
     if (file.size > MAX_FILE_SIZE_BYTES) {
       showToast(
@@ -1782,7 +2175,7 @@ export default function App() {
     }
 
     const tempBlobUrl = URL.createObjectURL(file);
-    const cleanName = file.name.replace(/\.[^/.]+$/, '');
+    const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_—/\\-]+/g, ' ').trim();
     const formattedSize =
       file.size >= 1024 * 1024
         ? `${(file.size / (1024 * 1024)).toFixed(2)} MB`
@@ -1800,9 +2193,6 @@ export default function App() {
       ? 'pdf'
       : 'presentation';
 
-    const targetDocId = replacingDocId || studioPickerTarget?.id;
-    if (!targetDocId) return;
-
     userModifiedMediaRef.current = true;
     isHydratingStateRef.current = false;
 
@@ -1813,18 +2203,21 @@ export default function App() {
           ...d,
           title: cleanName,
           fileUrl: tempBlobUrl,
-          previewUrl: isVideo || isImage ? tempBlobUrl : d.previewUrl || FALLBACK_SAFE_VIDEO_URLS[0],
+          previewUrl:
+            isVideo || isImage
+              ? tempBlobUrl
+              : '/user_uploads/media_doc_doc-uploaded-1793171909555-8olc.jpg',
           fileSizeFormatted: formattedSize,
           mediaType,
           mimeType: file.type || undefined,
           badge: isVideo
-            ? 'دليل مرئي مستبدل من الاستوديو (MP4)'
+            ? 'دليل مرئي محدث (MP4)'
             : isImage
-            ? 'صورة دليل مستبدلة من الاستوديو'
+            ? 'صورة دليل رسمي محدثة'
             : isPdf
-            ? 'مستند PDF مستبدل من الاستوديو'
-            : 'عرض تقديمي مستبدل من الاستوديو',
-          description: `تم استبدال هذا الدليل مباشرة من الاستوديو بالملف «${file.name}» (${formattedSize}) وحفظه بشكل دائم في سجل الأدلة الرسمية.`,
+            ? 'مستند PDF رسمي محدث'
+            : 'عرض تقديمي محدث',
+          description: `تم استبدال هذا الدليل بالملف «${cleanName}» (${formattedSize}) وحفظه تلقائياً بشكل دائم في سجل الأدلة الرسمية.`,
         };
         if (selectedDoc?.id === d.id) {
           setSelectedDoc(updated);
@@ -1832,6 +2225,16 @@ export default function App() {
         return updated;
       })
     );
+
+    setModificationLogs((prev) => [
+      {
+        id: `doc-rep-${Date.now()}`,
+        action: 'استبدال مرفق رسمي',
+        detail: `تم استبدال المرفق بالملف الجديد «${cleanName}» (${formattedSize}) وحفظه تلقائياً.`,
+        time: new Date().toLocaleTimeString('ar-OM', { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...prev,
+    ]);
 
     // Save permanently to server & IndexedDB
     persistUploadedMediaFile(file, `doc_${targetDocId}`).then(({ permanentUrl }) => {
@@ -2318,11 +2721,33 @@ export default function App() {
     if (!targetId) return;
 
     const lowerName = file.name.toLowerCase();
-    const isImage = file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(lowerName);
+    const isSupportedVideo =
+      file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(lowerName);
+    const isImage =
+      file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(lowerName);
+
+    if (!isSupportedVideo && !isImage) {
+      showToast(
+        'error',
+        'صيغة الملف غير مدعومة',
+        'يرجى اختيار ملف فيديو بصيغة شائعة (MP4 أو WebM أو MOV) أو صورة توثيقية.'
+      );
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      showToast(
+        'error',
+        'حجم الفيديو يتجاوز الحد المسموح',
+        `يرجى اختيار ملف لا يتجاوز حجمه ${MAX_FILE_SIZE_MB} ميجابايت لضمان سرعة التحميل والأداء.`
+      );
+      return;
+    }
+
     const detectedMediaType: 'video' | 'image' = isImage ? 'image' : 'video';
 
     const tempBlobUrl = URL.createObjectURL(file);
-    const cleanName = file.name.replace(/\.[^/.]+$/, '');
+    const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_—/\\-]+/g, ' ').trim();
 
     setFieldVideos((prev) =>
       prev.map((vid, idx) => {
@@ -2341,12 +2766,12 @@ export default function App() {
             ? `العرض التقديمي الافتتاحي المعتمد: ${cleanName}`
             : `توثيق ميداني من الاستوديو: ${cleanName}`,
           subtitle: isImage
-            ? 'صورة توثيقية ميدانية من الاستوديو — محفوظة مع الحفاظ على الدليل الأصلي'
+            ? 'صورة توثيقية ميدانية من الاستوديو محفوظة مع الحفاظ على الدليل الأصلي'
             : isConvCard
-            ? `دلائل المحادثات الموثقة بالصوت والصورة — دليل رسمي رقم (${idx + 1}) محدث من الاستوديو`
+            ? `دلائل المحادثات الموثقة بالصوت والصورة، دليل رسمي رقم (${idx + 1}) محدث من الاستوديو`
             : keepAudio
-            ? 'فيديو العرض التقديمي الافتتاحي (بالصوت الكامل) — محفوظ بشكل دائم من الاستوديو'
-            : 'فيديو ميداني صامت (بدون صوت) — محفوظ بشكل دائم من الاستوديو',
+            ? 'فيديو العرض التقديمي الافتتاحي بالصوت الكامل محفوظ بشكل دائم من الاستوديو'
+            : 'فيديو ميداني صامت بدون صوت محفوظ بشكل دائم من الاستوديو',
           badge: isConvCard
             ? vid.badge || `دلائل المحادثات · الدليل ${idx + 1}`
             : isImage
@@ -2369,6 +2794,16 @@ export default function App() {
         return updatedVid;
       })
     );
+
+    setModificationLogs((prev) => [
+      {
+        id: `mod-${Date.now()}`,
+        action: 'تغيير فيديو أو مرفق',
+        detail: `تم استبدال العنصر (${targetId}) بالملف «${cleanName}» وحفظه تلقائياً.`,
+        time: new Date().toLocaleTimeString('ar-OM', { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...prev,
+    ]);
 
     // Save permanently to server & IndexedDB so it never resets on exit/reload
     persistUploadedMediaFile(file, `vid_${targetId}`).then(({ permanentUrl }) => {
@@ -2396,38 +2831,71 @@ export default function App() {
     setStudioPickerTarget(null);
   };
 
-  // Add a new Silent Field Video or Image directly from Studio/Device
+  // Add a new Video or Image directly from Studio/Device with format & size validation
   const handleAddStudioVideo = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
+    const lowerName = file.name.toLowerCase();
+    const isSupportedVideo =
+      file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(lowerName);
+    const isImage =
+      file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(lowerName);
+
+    if (!isSupportedVideo && !isImage) {
+      showToast(
+        'error',
+        'صيغة الملف غير مدعومة',
+        'يرجى اختيار ملف فيديو بصيغة شائعة (MP4 أو WebM أو MOV) أو صورة توثيقية.'
+      );
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      showToast(
+        'error',
+        'حجم الفيديو يتجاوز الحد المسموح',
+        `يرجى اختيار ملف لا يتجاوز حجمه ${MAX_FILE_SIZE_MB} ميجابايت لضمان سرعة التحميل والأداء.`
+      );
+      return;
+    }
+
     userModifiedMediaRef.current = true;
     isHydratingStateRef.current = false;
 
-    const lowerName = file.name.toLowerCase();
-    const isImage = file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(lowerName);
-    const newVidId = `vid-studio-${Date.now()}`;
+    const newVidId = `conv-evidence-added-${Date.now()}`;
     const tempBlobUrl = URL.createObjectURL(file);
-    const cleanName = file.name.replace(/\.[^/.]+$/, '');
+    const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_—/\\-]+/g, ' ').trim();
+    const nextIndex = fieldVideos.length + 1;
     const newVid: FieldVideoItem = {
       id: newVidId,
       url: tempBlobUrl,
       mediaType: isImage ? 'image' : 'video',
-      title: `توثيق ميداني مضاف: ${cleanName}`,
+      title: `دلائل المحادثات (${nextIndex}): ${cleanName}`,
       subtitle: isImage
-        ? 'صورة ميدانية مضافة ومحفوظة بشكل دائم من الاستوديو الخاص بكم'
-        : 'فيديو ميداني صامت (بدون صوت) مضاف ومحفوظ بشكل دائم من الاستوديو الخاص بكم',
-      badge: isImage ? 'صورة ميدانية مضافة' : 'مرفق مرئي (صامت بدون صوت)',
-      durationLabel: isImage ? 'صورة ميدانية' : 'ميداني · صامت',
-      hasAudio: false,
+        ? 'صورة توثيقية مضافة ومحفوظة بشكل دائم عبر واجهة الرفع الآمنة'
+        : 'فيديو توثيقي مضاف ومحفوظ بشكل دائم بالصوت الواضح عبر واجهة الرفع الآمنة',
+      badge: `دلائل المحادثات · الدليل ${nextIndex}`,
+      durationLabel: isImage ? 'صورة توثيقية' : 'بالصوت الواضح',
+      hasAudio: !isImage,
       scale: 100,
-      heightMode: 'md',
-      fitMode: 'cover',
+      heightMode: 'lg',
+      fitMode: 'contain',
       posY: 50,
     };
 
     setFieldVideos((prev) => [...prev, newVid]);
+
+    setModificationLogs((prev) => [
+      {
+        id: `add-${Date.now()}`,
+        action: 'إضافة فيديو جديد',
+        detail: `تمت إضافة «${cleanName}» كدليل رقم (${nextIndex}) بعد التحقق من الصيغة والحجم وحفظه تلقائياً.`,
+        time: new Date().toLocaleTimeString('ar-OM', { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...prev,
+    ]);
 
     persistUploadedMediaFile(file, `vid_${newVidId}`).then(({ permanentUrl }) => {
       setFieldVideos((prev) =>
@@ -2437,13 +2905,13 @@ export default function App() {
 
     showToast(
       'success',
-      'تمت إضافة وحفظ المرفق الميداني بشكل دائم',
-      `تم إدراج وحفظ «${cleanName}» بشكل دائم ولن يُحذف عند الخروج.`
+      'تمت إضافة وحفظ الفيديو الجديد بشكل دائم',
+      `تم إدراج وحفظ «${cleanName}» بشكل دائم في قائمة الفيديوهات.`
     );
     setStudioPickerTarget(null);
   };
 
-  // Change Background Video directly from Studio/Device
+  // Change or Add Background Video directly from Studio/Device into the interactive rotating playlist
   const handleChangeBgFromStudio = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -2453,23 +2921,28 @@ export default function App() {
     isHydratingStateRef.current = false;
 
     const tempBlobUrl = URL.createObjectURL(file);
-    const cleanName = file.name.replace(/\.[^/.]+$/, '');
+    const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_—/\\-]+/g, ' ').trim();
     setBgVideoUrl(tempBlobUrl);
-    setAutoCycleBgScenes(false);
+    setCustomBgUrls((prev) => [tempBlobUrl, ...prev]);
+    setBgSceneIndex(0);
+    setAutoCycleBgScenes(true);
 
-    persistUploadedMediaFile(file, 'bg_video').then(({ permanentUrl }) => {
+    persistUploadedMediaFile(file, `bg_video_${Date.now()}`).then(({ permanentUrl }) => {
       setBgVideoUrl(permanentUrl);
+      setCustomBgUrls((prev) =>
+        prev.map((u) => (u === tempBlobUrl ? permanentUrl : u))
+      );
     });
 
     showToast(
       'success',
-      'تم تغيير وحفظ فيديو الخلفية بشكل دائم',
-      `تم تعيين وحفظ «${cleanName}» كخلفية فيديو متحركة صامتة (Muted) بشكل دائم.`
+      'تم إضافة وحفظ فيديو الخلفية التفاعلية بشكل دائم',
+      `تم إدراج «${cleanName}» ضمن قائمة فيديوهات الخلفية التفاعلية المتبادلة وحفظه تلقائياً.`
     );
     setStudioPickerTarget(null);
   };
 
-  // Delete a Video Card from the gallery
+  // Delete a Video Card from the gallery permanently
   const handleDeleteFieldVideo = (vidId: string, vidTitle: string) => {
     if (fieldVideos.length <= 1) {
       showToast('warning', 'تنبيه', 'يجب الإبقاء على فيديو واحد على الأقل في الواجهة، ويمكنك استبداله من الاستوديو.');
@@ -2477,14 +2950,49 @@ export default function App() {
     }
     userModifiedMediaRef.current = true;
     isHydratingStateRef.current = false;
+    setDeletedIds((prev) => (prev.includes(vidId) ? prev : [...prev, vidId]));
     setFieldVideos((prev) => prev.filter((v) => v.id !== vidId));
     if (activeModalVideo?.id === vidId) {
       setActiveModalVideo(null);
     }
-    showToast('info', 'تم حذف الفيديو نهائياً', `تمت إزالة «${vidTitle}» وحفظ التعديل بشكل دائم.`);
+    setModificationLogs((prev) => [
+      {
+        id: `vid-del-${Date.now()}`,
+        action: 'حذف فيديو من دلائل المحادثات',
+        detail: `تم حذف الفيديو «${vidTitle}» نهائياً وحفظ التعديل تلقائياً.`,
+        time: new Date().toLocaleTimeString('ar-OM', { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...prev,
+    ]);
+    showToast('info', 'تم حذف الفيديو نهائياً', `تمت إزالة «${vidTitle}» وحفظ التعديل بشكل دائم ولن يعود عند تحديث الصفحة.`);
   };
 
-  // Replace current Top 6 Showcase Slot with ANY Photo OR Video directly from Studio/Device
+  // Delete a Showcase Slot (Truck/Warehouse photo or video) permanently
+  const handleDeleteFleetPhotoSlot = (slotIdx: number) => {
+    if (fleetPhotos.length <= 1) {
+      showToast('warning', 'تنبيه', 'يجب الإبقاء على عنصر واحد على الأقل في المعرض.');
+      return;
+    }
+    const targetItem = fleetPhotos[slotIdx];
+    if (!targetItem) return;
+    userModifiedMediaRef.current = true;
+    isHydratingStateRef.current = false;
+    setDeletedIds((prev) => (prev.includes(targetItem.url) ? prev : [...prev, targetItem.url]));
+    setFleetPhotos((prev) => prev.filter((_, idx) => idx !== slotIdx));
+    setSelectedFleetIdx((prev) => Math.max(0, Math.min(prev, fleetPhotos.length - 2)));
+    setModificationLogs((prev) => [
+      {
+        id: `fleet-del-${Date.now()}`,
+        action: 'حذف عنصر من معرض الشاحنات والمخازن',
+        detail: `تم حذف «${targetItem.title}» نهائياً وحفظ التعديل تلقائياً.`,
+        time: new Date().toLocaleTimeString('ar-OM', { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...prev,
+    ]);
+    showToast('info', 'تم الحذف والحفظ التلقائي', `تم حذف «${targetItem.title}» بشكل دائم.`);
+  };
+
+  // Replace current Showcase Slot with ANY Photo OR Video directly from Studio/Device
   const handleReplaceFleetPhotoFromStudio = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -2500,7 +3008,7 @@ export default function App() {
         ? studioPickerTarget.slotIdx
         : selectedFleetIdx;
     const tempBlobUrl = URL.createObjectURL(file);
-    const cleanName = file.name.replace(/\.[^/.]+$/, '');
+    const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_—/\\-]+/g, ' ').trim();
 
     setFleetPhotos((prev) =>
       prev.map((item, idx) =>
@@ -2529,7 +3037,7 @@ export default function App() {
     showToast(
       'success',
       isVideo ? 'تم إدراج وحفظ الفيديو في الخانة بشكل دائم' : 'تم تحديث وحفظ الصورة في الخانة بشكل دائم',
-      `تم وضع وحفظ «${cleanName}» في الخانة رقم ${slotIndex + 1} — ويمكنك تكبيره أو تصغيره أو فتحه بملء الشاشة.`
+      `تم وضع وحفظ «${cleanName}» في الخانة رقم ${slotIndex + 1} بشكل دائم.`
     );
     setStudioPickerTarget(null);
   };
@@ -2541,6 +3049,8 @@ export default function App() {
     toggleFit?: boolean,
     deltaScale = 0
   ) => {
+    userModifiedMediaRef.current = true;
+    isHydratingStateRef.current = false;
     setFleetPhotos((prev) =>
       prev.map((item, idx) => {
         if (idx !== selectedFleetIdx) return item;
@@ -2576,6 +3086,8 @@ export default function App() {
       deltaY?: number;
     }
   ) => {
+    userModifiedMediaRef.current = true;
+    isHydratingStateRef.current = false;
     setFieldVideos((prev) =>
       prev.map((v) => {
         if (v.id !== vidId) return v;
@@ -2653,9 +3165,9 @@ export default function App() {
         .filter((d) => Boolean(d.fileUrl))
         .map(
           (d) =>
-            `مستند PDF مرفوع ومعالج في النظام: «${d.title}» (${d.badge}) — الملخص: ${d.description} — المحاور المستخرجة: ${d.pages
+            `مستند PDF مرفوع ومعالج في النظام: «${d.title}» (${d.badge})، الملخص: ${d.description}، المحاور المستخرجة: ${d.pages
               .map((p) => `${p.title}: ${p.content.join(' | ')}`)
-              .join(' // ')}`
+              .join(' | ')}`
         )
         .join('\n');
 
@@ -2676,7 +3188,7 @@ export default function App() {
       } else {
         replyText =
           FALLBACK_ANSWERS[trimmed] ||
-          `بناءً على الوقائع الموثقة في الملف الرقابي لشركة بن كليلة العامري للتجارة والاستثمار (س.ت: 1111061) المرفوع بعناية الفاضل خالد المسروري:\n\n1. الالتزام المالي الكامل: تم سداد 18,640 ريال عماني نقداً ومقدماً بنسبة 100% لتمويل شحنات الـ 16 تريلا لكل دورة تشغيلية (40 يوماً) ضمن صفقة الـ 1,870,000 ر.ع لصالح العميل النهائي (مزرعة بركة الوقن) دعماً للصادرات غير النفطية في مسار رؤية عُمان 2040.\n2. الإخلال المستندي والفني: تسليم شهادة تحليل (COA) بتاريخ 23 يونيو 2026 تثبت خلو المنتج من مضادات الكوكسيديا، في تناقض صارخ مع البطاقة التعريفية المطبوعة على الكيس، مما أدى لإغلاق الطلب رقم (APH-12052026-3382929) في نظام MOCCAE الإماراتي.\n3. التدخل الخارجي (نوفل): تعمد عرقلة وحجب الأوراق البيطرية لإحراق الوقت واستنفاد مخزون المزرعة (160 ألف طير) لدفع مسار التصدير قسراً نحو الوسيط الخارجي (نوفل / أطياف جلوبال FZC)، ومحاولة فرض إتاوة 50 ر.ع لكل شحنة مع احتجاز الشاحنات 4 أيام رغم سداد 700 ر.ع مقدم نقل.\n4. التكييف القانوني: يشكّل هذا المسلك امتناعاً تعسفياً ضمنياً مقنعاً عن التسليم بالمخالفة للمادتين (9 و10) من قانون حماية المنافسة ومنع الاحتكار (67/2014) والمادة (381) والمادتين (155 و156) من قانون المعاملات المدنية (29/2013).`;
+          `بناءً على الوقائع الموثقة في الملف الرقابي لشركة بن كليلة العامري للتجارة والاستثمار (سجل تجاري 1111061) المرفوع بعناية أستاذ خالد المسروري مدير دائرة الاحتكار:\n\n1. الالتزام المالي الكامل: تم سداد كافة الدفعات التشغيلية نقداً ومقدماً بنسبة 100% لتمويل شحنات الـ 16 تريلا لكل دورة تشغيلية (40 يوماً) لصالح العميل النهائي (مزرعة بركة الوقن) دعماً للصادرات غير النفطية في مسار رؤية عُمان 2040.\n2. الإخلال المستندي والفني: تسليم شهادة تحليل (COA) بتاريخ 23 يونيو 2026 تثبت خلو المنتج من مضادات الكوكسيديا، في تناقض صارخ مع البطاقة التعريفية المطبوعة على الكيس، مما أدى لإغلاق الطلب في نظام MOCCAE الإماراتي.\n3. التدخل الخارجي (نوفل): تعمد عرقلة وحجب الأوراق البيطرية لإحراق الوقت واستنفاد مخزون المزرعة (160 ألف طير) لدفع مسار التصدير قسراً نحو الوسيط الخارجي (نوفل أطياف جلوبال FZC)، ومحاولة فرض إتاوة 50 ر.ع لكل شحنة مع احتجاز الشاحنات 4 أيام رغم سداد مقدم النقل نقداً.\n4. التكييف القانوني: يشكّل هذا المسلك امتناعاً تعسفياً ضمنياً مقنعاً عن التسليم بالمخالفة للمادتين (9 و10) من قانون حماية المنافسة ومنع الاحتكار الصادر بالمرسوم السلطاني 67 لسنة 2014 والمادة (381) والمادتين (155 و156) من قانون المعاملات المدنية الصادر بالمرسوم السلطاني 29 لسنة 2013.`;
       }
 
       setMessages((prev) => [
@@ -2693,7 +3205,7 @@ export default function App() {
     } catch {
       const fallbackReply =
         FALLBACK_ANSWERS[trimmed] ||
-        `استناداً إلى سجل الوقائع المرفوع إلى وزارة التجارة والصناعة وترويج الاستثمار (ملف المراجع: الفاضل خالد المسروري)، فإن موقف شركة بن كليلة العامري للتجارة والاستثمار يستند إلى سداد نقدي مسبق بنسبة 100% (18,640 ر.ع) وعدم وجود أي مديونية، في حين ثبت التناقض المستندي بين شهادة (COA) المؤرخة 23 يونيو 2026 والملصق التعريفي، فضلاً عن حجب الأوراق البيطرية لدفع مسار التصدير قسراً نحو الوسيط الخارجي (نوفل / أطياف جلوبال FZC) واحتجاز الشاحنات 4 أيام بعد استلام 700 ر.ع مقدم نقل، وهو ما يخالف صراحة المرسوم السلطاني رقم 67/2014 والمرسوم السلطاني رقم 29/2013.`;
+        `استناداً إلى سجل الوقائع المرفوع إلى وزارة التجارة والصناعة وترويج الاستثمار بعناية أستاذ خالد المسروري مدير دائرة الاحتكار، فإن موقف شركة بن كليلة العامري للتجارة والاستثمار يستند إلى سداد نقدي مسبق بنسبة 100% وعدم وجود أي مديونية، في حين ثبت التناقض المستندي بين شهادة (COA) المؤرخة 23 يونيو 2026 والملصق التعريفي، فضلاً عن حجب الأوراق البيطرية لدفع مسار التصدير قسراً نحو الوسيط الخارجي (نوفل أطياف جلوبال FZC) واحتجاز الشاحنات 4 أيام بعد استلام مقدم النقل النقدي، وهو ما يخالف صراحة المرسوم السلطاني رقم 67 لسنة 2014 والمرسوم السلطاني رقم 29 لسنة 2013.`;
 
       setMessages((prev) => [
         ...prev,
@@ -3030,9 +3542,10 @@ export default function App() {
       style={{ '--glass-alpha': glassAlpha } as React.CSSProperties}
       dir="rtl"
     >
-      {/* FIXED FULL-SCREEN VIDEO BACKGROUND WITH ROTATING FIELD/TRUCK VIDEOS ONE AFTER ANOTHER */}
+      {/* FIXED FULL-SCREEN VIDEO BACKGROUND WITH ROTATING WAREHOUSE & TRUCK VIDEOS ONE AFTER ANOTHER */}
       <div className="fixed inset-0 z-0 w-screen h-screen overflow-hidden pointer-events-none no-print bg-[#140526]">
         <video
+          key={activeBackgroundVideoUrl}
           src={activeBackgroundVideoUrl}
           autoPlay
           loop={!autoCycleBgScenes}
@@ -3053,10 +3566,11 @@ export default function App() {
         />
         {allBgVideoUrls.length > 1 && (
           <video
+            key={`preload-${allBgVideoUrls[(bgSceneIndex + 1) % allBgVideoUrls.length]}`}
             src={allBgVideoUrls[(bgSceneIndex + 1) % allBgVideoUrls.length]}
             muted
             playsInline
-            preload="metadata"
+            preload="auto"
             className="hidden"
           />
         )}
@@ -3128,6 +3642,50 @@ export default function App() {
             className="hidden"
           />
           <audio
+            ref={studioTrackAudioRef}
+            src={studioTrackSrc}
+            preload="auto"
+            onTimeUpdate={(e) => {
+              const el = e.currentTarget;
+              let t = el.currentTime;
+              const skipList = AUDIO_SKIP_INTERVALS[selectedApprovedRecordingId] || [];
+              for (const interval of skipList) {
+                if (t >= interval.start && t < interval.end - 0.05) {
+                  el.currentTime = interval.end;
+                  t = interval.end;
+                  break;
+                }
+              }
+              setStudioTrackTime(t);
+            }}
+            onLoadedMetadata={(e) => {
+              if (e.currentTarget.duration && Number.isFinite(e.currentTarget.duration)) {
+                const dur = e.currentTarget.duration;
+                setStudioTrackDuration(dur);
+              }
+            }}
+            onEnded={() => {
+              setIsStudioTrackPlaying(false);
+              const currentIdx = audioRecordings.findIndex(
+                (r) => r.id === selectedApprovedRecordingId
+              );
+              const nextRec =
+                autoChainAllRecordingsRef.current &&
+                currentIdx !== -1 &&
+                currentIdx + 1 < audioRecordings.length
+                  ? audioRecordings[currentIdx + 1]
+                  : null;
+              if (nextRec) {
+                window.setTimeout(() => {
+                  playApprovedRecordingItem(nextRec, true, true);
+                }, 400);
+              } else {
+                setActiveAudioId(null);
+              }
+            }}
+            className="hidden"
+          />
+          <audio
             ref={clarificationAudioRef}
             src={clarificationAudioSrc}
             preload="auto"
@@ -3141,12 +3699,25 @@ export default function App() {
               setIsClarificationPlaying(false);
               setActiveAudioId(null);
               clarificationEndRef.current = null;
-              triggerSmartSlideTransitionAlert('section4', () => {
-                const sec3Range = SECTION_TIMESTAMPS.section3;
-                if (sec3Range) {
-                  playElevenLabsSegment('section3', sec3Range.start, sec3Range.end, null, false);
-                }
-              });
+              const clarIdx = audioRecordings.findIndex((r) => r.id === 'clarification-questions');
+              const nextAfterClar =
+                autoChainAllRecordingsRef.current &&
+                clarIdx !== -1 &&
+                clarIdx + 1 < audioRecordings.length
+                  ? audioRecordings[clarIdx + 1]
+                  : null;
+              if (nextAfterClar) {
+                window.setTimeout(() => {
+                  playApprovedRecordingItem(nextAfterClar, true, true);
+                }, 450);
+              } else {
+                triggerSmartSlideTransitionAlert('section4', () => {
+                  const sec3Range = SECTION_TIMESTAMPS.section3;
+                  if (sec3Range) {
+                    playElevenLabsSegment('section3', sec3Range.start, sec3Range.end, null, false);
+                  }
+                });
+              }
             }}
             onError={() => {
               if (clarificationAudioSrc !== CLARIFICATION_QUESTIONS_FALLBACK_URL) {
@@ -3158,7 +3729,24 @@ export default function App() {
         </>
       )}
 
-      {/* Hidden Studio File Inputs for Direct Video, Photo, Background, Fleet Photo & Evidence Replacement */}
+      {/* Hidden Studio File Inputs for Direct Video, Photo, Background, Fleet Photo, Audio & Evidence Replacement */}
+      <input
+        id="studio-add-audio-input"
+        ref={addAudioInputRef}
+        type="file"
+        multiple
+        accept="audio/*,.mp3,.wav,.m4a,.ogg,.aac"
+        onChange={handleAddAudioRecording}
+        className="hidden"
+      />
+      <input
+        id="studio-replace-audio-input"
+        ref={replaceAudioInputRef}
+        type="file"
+        accept="audio/*,.mp3,.wav,.m4a,.ogg,.aac"
+        onChange={handleReplaceAudioRecording}
+        className="hidden"
+      />
       <input
         id="studio-replace-opening-input"
         ref={replaceOpeningStudioInputRef}
@@ -3670,11 +4258,11 @@ export default function App() {
                   رؤية عُمان 2040 · ملف رقابي
                 </span>
                 <span className="bg-[#3d1c68] border border-[#c9a452]/50 text-[#f3dfa6] text-[11px] font-bold px-2.5 py-0.5 rounded-md">
-                  ملف المراجع / الفاضل خالد المسروري
+                  ملف المراجع أستاذ خالد المسروري مدير الدائرة
                 </span>
               </div>
               <h1 className="text-white font-extrabold text-xs sm:text-sm mt-1">
-                شركة بن كليلة العامري للتجارة والاستثمار — الصادرات غير النفطية
+                شركة بن كليلة العامري للتجارة والاستثمار · الصادرات غير النفطية
               </h1>
             </div>
           </div>
@@ -3823,6 +4411,20 @@ export default function App() {
 
             <button
               type="button"
+              onClick={() => setShowInternalAdminPanel(true)}
+              title="لوحة التحكم الداخلية وتجهيز النشر (خاصة بالمالك قبل النشر)"
+              className={`px-2.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                showStudioControls
+                  ? 'gold-metallic-card ring-2 ring-[#fff2c6]'
+                  : 'bg-[#2b124c] hover:bg-[#3d1b6a] border-[#c9a452]/80 text-[#f3dfa6]'
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5 text-[#e7cb82]" />
+              <span>{showStudioControls ? 'بيئة التحرير (نشطة)' : 'لوحة التحكم'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => {
                 stopAllAudio();
                 setPasswordInput('');
@@ -3933,11 +4535,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Verbatim Recording Transcript for Hero / Introduction */}
-              <div className="max-w-4xl mx-auto text-right">
-                {renderRecordingVerbatimBox('hero')}
-              </div>
-
               {/* PROMINENT 30-SECOND OPENING PRESENTATION VIDEO AT THE BEGINNING (BOUND TO OPENING_PRESENTATION_VIDEO) */}
               <div className="mt-8 bg-[#1f0b38]/40 backdrop-blur-[2px] border-2 border-[#e7cb82] rounded-3xl p-4 sm:p-6 max-w-4xl mx-auto shadow-2xl text-right no-print">
                 <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 mb-4 border-b border-[#c9a452]/40">
@@ -4037,76 +4634,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Hero CTA & Approved Audio Recordings Switcher (Dropdown + Buttons) */}
-              <div className="mt-7 flex flex-wrap items-center justify-center gap-3 no-print">
-                <button
-                  type="button"
-                  onClick={() =>
-                    playClarificationQuestions(0, null, 'clarification-full', true)
-                  }
-                  className={`px-5 py-3 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
-                    isClarificationPlaying
-                      ? 'bg-white text-[#2b124c] ring-2 ring-[#e7cb82]'
-                      : 'gold-metallic-card hover:brightness-105'
-                  }`}
-                >
-                  {isClarificationPlaying ? (
-                    <Pause className="w-4 h-4 fill-current" />
-                  ) : (
-                    <Volume2 className="w-4 h-4" />
-                  )}
-                  <span>
-                    {isClarificationPlaying
-                      ? `مذكرة الأسئلة الاستيضاحية (${formatTime(clarificationTime)} / ${formatTime(clarificationDuration)})`
-                      : 'تشغيل مذكرة الأسئلة الاستيضاحية الـ 12 (07:26)'}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    playExecutiveAppeal(0, null, 'exec-appeal-full', true)
-                  }
-                  className={`px-5 py-3 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
-                    isExecAppealPlaying
-                      ? 'bg-white text-[#2b124c] ring-2 ring-[#e7cb82]'
-                      : 'bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#e7cb82] text-[#f3dfa6]'
-                  }`}
-                >
-                  {isExecAppealPlaying ? (
-                    <Pause className="w-4 h-4 fill-current" />
-                  ) : (
-                    <Volume2 className="w-4 h-4" />
-                  )}
-                  <span>
-                    {isExecAppealPlaying
-                      ? `الخلاصة التنفيذية (${formatTime(execAppealTime)} / ${formatTime(execAppealDuration)})`
-                      : 'الخلاصة التنفيذية والنداء الختامي (03:46)'}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={startFullInteractivePresentation}
-                  className={`px-5 py-3 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
-                    isFullPresentationPlaying || activeAudioId === 'hero'
-                      ? 'bg-white text-[#2b124c] ring-2 ring-[#e7cb82]'
-                      : 'bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#e7cb82] text-[#f3dfa6]'
-                  }`}
-                >
-                  {isFullPresentationPlaying || activeAudioId === 'hero' ? (
-                    <Pause className="w-4 h-4 fill-current" />
-                  ) : (
-                    <Volume2 className="w-4 h-4" />
-                  )}
-                  <span>
-                    {isFullPresentationPlaying
-                      ? 'جاري الاستماع للعرض الشامل...'
-                      : 'السرد التفصيلي الشامل للملف (08:36)'}
-                  </span>
-                </button>
-              </div>
-
               {/* 1. المقدمة: البيانات المالية والتشغيلية وأسطول الشاحنات (تُذكر الأرقام المالية هنا فقط دون تكرار) */}
               <div
                 id="section-01"
@@ -4119,7 +4646,7 @@ export default function App() {
                     </div>
                     <div>
                       <span className="text-[#e7cb82] text-xs font-extrabold block">
-                        1. المقدمة — الوقائع التعاقدية والتزام المشتري في مسار رؤية عُمان 2040
+                        1. المقدمة: الوقائع التعاقدية والتزام المشتري في مسار رؤية عُمان 2040
                       </span>
                       <h3 className="text-[#fff2c6] text-lg sm:text-xl font-black mt-0.5">
                         المقدمة: من صلالة إلى تأسيس خط التصدير الوطني غير النفطي
@@ -4183,118 +4710,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Fleet Media Switcher (Trucks & Warehouses Only) */}
-                <div className="mt-5 bg-[#140526]/75 border border-[#c9a452]/70 rounded-2xl p-4">
-                  {(() => {
-                    const currentItem = fleetPhotos[selectedFleetIdx] || FLEET_PHOTOS[0];
-                    const posY = typeof currentItem.posY === 'number' ? currentItem.posY : 50;
-                    const posX = typeof currentItem.posX === 'number' ? currentItem.posX : 50;
-                    const itemScale =
-                      typeof currentItem.scale === 'number' ? currentItem.scale : 100;
-                    const fitMode = currentItem.fitMode || 'cover';
-                    const isVideoSlot = currentItem.mediaType === 'video';
-                    const displayBadge =
-                      currentItem.badge &&
-                      (currentItem.badge.includes('16 تريلا') ||
-                        currentItem.badge.includes('أسطول'))
-                        ? 'جدول 16 تريلا'
-                        : currentItem.badge;
-
-                    return (
-                      <>
-                        <div
-                          onClick={() => {
-                            setIsModalFullscreen(true);
-                            setModalFitMode('contain');
-                            setModalZoomScale(100);
-                            setActiveModalVideo({
-                              id: `slot-${selectedFleetIdx}`,
-                              url: currentItem.url,
-                              title:
-                                currentItem.title ||
-                                `مرفق أسطول الشاحنات والمخازن رقم ${selectedFleetIdx + 1}`,
-                              subtitle: 'معاينة بملء الشاشة الكاملة لأسطول الشاحنات والمخازن',
-                              badge: displayBadge || 'جدول 16 تريلا',
-                              durationLabel: isVideoSlot ? 'فيديو ميداني' : 'صورة ميدانية',
-                              hasAudio: false,
-                              mediaType: isVideoSlot ? 'video' : 'image',
-                            });
-                          }}
-                          className={`${
-                            isShowcaseExpanded ? 'h-72 sm:h-88' : 'h-52 sm:h-60'
-                          } rounded-xl border-2 border-[#c9a452] overflow-hidden relative bg-[#1c0b33] select-none transition-all cursor-pointer`}
-                        >
-                          {isVideoSlot ? (
-                            <video
-                              key={currentItem.url}
-                              src={currentItem.url}
-                              autoPlay
-                              muted
-                              loop
-                              playsInline
-                              style={{
-                                objectPosition: `${posX}% ${posY}%`,
-                                transform: `scale(${itemScale / 100})`,
-                              }}
-                              className={`w-full h-full pointer-events-none transition-transform duration-200 ${
-                                fitMode === 'contain' ? 'object-contain' : 'object-cover'
-                              }`}
-                            />
-                          ) : (
-                            <img
-                              src={currentItem.url}
-                              alt={currentItem.title || ''}
-                              draggable={false}
-                              style={{
-                                objectPosition: `${posX}% ${posY}%`,
-                                transform: `scale(${itemScale / 100})`,
-                              }}
-                              className={`w-full h-full pointer-events-none transition-transform duration-200 ${
-                                fitMode === 'contain' ? 'object-contain' : 'object-cover'
-                              }`}
-                            />
-                          )}
-                          <span className="absolute bottom-2.5 right-2.5 royal-purple-box text-[#f3dfa6] text-[10px] font-bold px-2.5 py-1 rounded-md flex items-center gap-1 shadow-md pointer-events-none">
-                            {isVideoSlot ? (
-                              <Film className="w-3 h-3 text-[#e7cb82]" />
-                            ) : (
-                              <ImageIcon className="w-3 h-3 text-[#e7cb82]" />
-                            )}
-                            <span>{displayBadge}</span>
-                          </span>
-                        </div>
-
-                        <div className="mt-2.5 flex items-center justify-between gap-1.5 flex-wrap no-print">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {fleetPhotos.map((item, i) => {
-                              const isVid = item.mediaType === 'video';
-                              return (
-                                <button
-                                  key={`${item.url}-${i}`}
-                                  type="button"
-                                  onClick={() => setSelectedFleetIdx(i)}
-                                  className={`text-[10px] font-bold px-2.5 py-1 rounded-md border transition-colors cursor-pointer flex items-center gap-1 ${
-                                    selectedFleetIdx === i
-                                      ? 'gold-metallic-card'
-                                      : 'bg-[#2b124c] text-[#f3dfa6] border-[#c9a452]/60'
-                                  }`}
-                                >
-                                  {isVid ? (
-                                    <Film className="w-3 h-3" />
-                                  ) : (
-                                    <ImageIcon className="w-3 h-3 opacity-75" />
-                                  )}
-                                  <span>شاحنة/مخزن {i + 1}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </>
-                    );
-                  })()}
-                </div>
-
+                {renderRecordingVerbatimBox('hero')}
                 {renderRecordingVerbatimBox('section1')}
               </div>
             </div>
@@ -4310,100 +4726,111 @@ export default function App() {
                   : 'border-[#c9a452]'
               }`}
             >
-              {/* Unified Audio Recording Selector Bar (Dropdown Menu + Clean Ministerial Tabs) */}
-              <div className="mb-6 p-4 rounded-2xl bg-[#1f0b38]/85 border border-[#c9a452] flex flex-wrap items-center justify-between gap-3 no-print">
-                <div className="flex items-center gap-2.5">
-                  <Volume2 className="w-4 h-4 text-[#e7cb82] shrink-0" />
-                  <span className="text-xs font-black text-[#f3dfa6]">
-                    مشغل التسجيلات الصوتية الرسمية المعتمدة (منقحة بدون أي تكرار):
-                  </span>
+              {/* Unified Audio Recording Selector Bar (All 10 Recordings + Direct Upload/Replace Controls) */}
+              <div className="mb-6 p-4 sm:p-5 rounded-2xl bg-[#1f0b38]/95 border-2 border-[#c9a452] space-y-4 no-print">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#c9a452]/40">
+                  <div className="flex items-center gap-2.5">
+                    <Volume2 className="w-5 h-5 text-[#e7cb82] shrink-0" />
+                    <div>
+                      <span className="text-xs sm:text-sm font-black text-[#f3dfa6] block">
+                        استوديو التسجيلات الصوتية المرفوعة والمعتمدة ({audioRecordings.length} تسجيلات مرتبة من المقدمة إلى الخاتمة)
+                      </span>
+                      <span className="text-[11px] text-[#e8dff5]/85 block mt-0.5">
+                        اضغط على أي تسجيل للاستماع المباشر لملفه الصوتي المرفوع، أو ارفع تسجيلاً صوتياً جديداً ليُحفظ تلقائياً بشكل دائم
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Direct Audio Upload & Sequential Play Buttons */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (audioRecordings.length > 0) {
+                          playApprovedRecordingItem(audioRecordings[0], true, false);
+                        }
+                      }}
+                      className="gold-metallic-card px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-md"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>تشغيل جميع التسجيلات الـ {audioRecordings.length} بالتسلسل</span>
+                    </button>
+
+                    {showStudioControls && (
+                      <>
+                        <label
+                          htmlFor="studio-add-audio-input"
+                          className="px-3.5 py-2 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] border border-[#e7cb82] text-[#f3dfa6] text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-md"
+                        >
+                          <Upload className="w-3.5 h-3.5 text-[#e7cb82]" />
+                          <span>+ رفع وإضافة تسجيل صوتي</span>
+                        </label>
+
+                        <label
+                          htmlFor="studio-replace-audio-input"
+                          className="px-3 py-2 rounded-xl bg-[#140526] hover:bg-[#260c45] border border-[#c9a452] text-[#e7cb82] text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5 text-[#e7cb82]" />
+                          <span>تغيير التسجيل المحدد</span>
+                        </label>
+                      </>
+                    )}
+                  </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 flex-1 sm:flex-initial justify-end">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <select
                     aria-label="اختيار التسجيل الصوتي المعتمد"
                     value={selectedApprovedRecordingId}
                     onChange={(e) => {
                       const recId = e.target.value;
-                      setSelectedApprovedRecordingId(recId);
-                      if (recId === 'rec-01-intro') {
-                        playElevenLabsSegment('hero', 0, SECTION_TIMESTAMPS.hero.end, 0, false);
-                      } else if (recId === 'clarification-questions') {
-                        playClarificationQuestions(0, null, 'clarification-full', true);
-                      } else if (recId === 'rec-03-commitment') {
-                        playElevenLabsSegment('section1', SECTION_TIMESTAMPS.section1.start, SECTION_TIMESTAMPS.section1.end, 1, false);
-                      } else if (recId === 'rec-04-noufal') {
-                        playElevenLabsSegment('section3', SECTION_TIMESTAMPS.section3.start, SECTION_TIMESTAMPS.section3.end, 2, false);
-                      } else if (recId === 'rec-06-coa') {
-                        playElevenLabsSegment('section2', SECTION_TIMESTAMPS.section2.start, SECTION_TIMESTAMPS.section2.end, 3, false);
-                      } else if (recId === 'rec-05-legal') {
-                        playElevenLabsSegment('section5', SECTION_TIMESTAMPS.section5.start, SECTION_TIMESTAMPS.section5.end, 4, false);
-                      } else if (recId === 'executive-appeal') {
-                        playExecutiveAppeal(0, null, 'exec-appeal-full', true);
-                      } else if (recId === 'main-dossier') {
-                        startFullInteractivePresentation();
-                      }
+                      playApprovedRecordingItem(recId, true, false);
                     }}
-                    className="bg-[#140526] border border-[#c9a452] text-[#f3dfa6] rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#e7cb82] cursor-pointer"
+                    className="bg-[#140526] border border-[#c9a452] text-[#f3dfa6] rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#e7cb82] cursor-pointer max-w-full"
                   >
-                    {APPROVED_AUDIO_RECORDINGS.map((rec) => (
+                    {audioRecordings.map((rec) => (
                       <option key={rec.id} value={rec.id}>
                         {rec.title} ({rec.durationLabel})
                       </option>
                     ))}
                   </select>
 
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    {APPROVED_AUDIO_RECORDINGS.map((rec) => {
-                      const isActiveRec =
-                        (rec.id === 'rec-01-intro' && activeAudioId === 'hero') ||
-                        (rec.id === 'clarification-questions' && isClarificationPlaying) ||
-                        (rec.id === 'rec-03-commitment' && activeAudioId === 'section1') ||
-                        (rec.id === 'rec-04-noufal' && activeAudioId === 'section3') ||
-                        (rec.id === 'rec-06-coa' && activeAudioId === 'section2') ||
-                        (rec.id === 'rec-05-legal' && activeAudioId === 'section5') ||
-                        (rec.id === 'executive-appeal' && isExecAppealPlaying) ||
-                        (rec.id === 'main-dossier' && isFullPresentationPlaying);
-                      return (
-                        <button
-                          key={rec.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedApprovedRecordingId(rec.id);
-                            if (rec.id === 'rec-01-intro') {
-                              playElevenLabsSegment('hero', 0, SECTION_TIMESTAMPS.hero.end, 0, false);
-                            } else if (rec.id === 'clarification-questions') {
-                              playClarificationQuestions(0, null, 'clarification-full', false);
-                            } else if (rec.id === 'rec-03-commitment') {
-                              playElevenLabsSegment('section1', SECTION_TIMESTAMPS.section1.start, SECTION_TIMESTAMPS.section1.end, 1, false);
-                            } else if (rec.id === 'rec-04-noufal') {
-                              playElevenLabsSegment('section3', SECTION_TIMESTAMPS.section3.start, SECTION_TIMESTAMPS.section3.end, 2, false);
-                            } else if (rec.id === 'rec-06-coa') {
-                              playElevenLabsSegment('section2', SECTION_TIMESTAMPS.section2.start, SECTION_TIMESTAMPS.section2.end, 3, false);
-                            } else if (rec.id === 'rec-05-legal') {
-                              playElevenLabsSegment('section5', SECTION_TIMESTAMPS.section5.start, SECTION_TIMESTAMPS.section5.end, 4, false);
-                            } else if (rec.id === 'executive-appeal') {
-                              playExecutiveAppeal(0, null, 'exec-appeal-full', true);
-                            } else {
-                              startFullInteractivePresentation();
-                            }
-                          }}
-                          className={`px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
-                            isActiveRec
-                              ? 'gold-metallic-card'
-                              : 'bg-[#2b124c] hover:bg-[#381960] text-[#f3dfa6] border-[#c9a452]/70'
-                          }`}
-                        >
-                          {isActiveRec ? (
-                            <Pause className="w-3 h-3 fill-current" />
-                          ) : (
-                            <Play className="w-3 h-3 fill-current" />
-                          )}
-                          <span>{rec.badge}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
+                  {isStudioTrackPlaying && (
+                    <span className="text-xs font-extrabold text-[#fff2c6] bg-[#2b124c] border border-[#e7cb82] px-3 py-1.5 rounded-xl tabular-nums">
+                      جاري تشغيل الملف المرفوع ({formatTime(studioTrackTime)} / {formatTime(studioTrackDuration)})
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {audioRecordings.map((rec) => {
+                    const isActiveRec =
+                      (rec.id === 'clarification-questions' && isClarificationPlaying) ||
+                      (rec.id === 'executive-appeal' && isExecAppealPlaying) ||
+                      (rec.id === 'main-dossier' && isFullPresentationPlaying) ||
+                      (isStudioTrackPlaying && activeAudioId === rec.id);
+                    return (
+                      <button
+                        key={rec.id}
+                        type="button"
+                        onClick={() => playApprovedRecordingItem(rec, true, false)}
+                        className={`px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                          isActiveRec
+                            ? 'gold-metallic-card ring-2 ring-[#fff2c6]'
+                            : selectedApprovedRecordingId === rec.id
+                            ? 'bg-[#381960] text-[#fff2c6] border-[#e7cb82]'
+                            : 'bg-[#2b124c] hover:bg-[#381960] text-[#f3dfa6] border-[#c9a452]/70'
+                        }`}
+                      >
+                        {isActiveRec ? (
+                          <Pause className="w-3 h-3 fill-current" />
+                        ) : (
+                          <Play className="w-3 h-3 fill-current" />
+                        )}
+                        <span>{rec.badge}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -4630,7 +5057,7 @@ export default function App() {
                   </div>
                   <div>
                     <span className="text-[#9c7625] text-xs font-extrabold block">
-                      3. الوقائع والتدخل الأجنبي (نوفل) — سلاسل الإمداد والحوكمة
+                      3. الوقائع والتدخل الأجنبي (نوفل) سلاسل الإمداد والحوكمة
                     </span>
                     <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
                       الوقائع والتدخل الأجنبي (نوفل): احتجاز الشاحنات ومحاولة إقصاء المستثمر الوطني
@@ -4648,7 +5075,7 @@ export default function App() {
                 </strong>{' '}
                 لدفع مسار التصدير قسراً نحو الوسيط الأجنبي{' '}
                 <strong className="text-[#2b124c] font-extrabold">
-                  (المدعو نوفل / أطياف جلوبال للتجارة FZC - المسجلة بمنطقة حرة بعجمان)
+                  (المدعو نوفل أطياف جلوبال للتجارة FZC المسجلة بمنطقة حرة بعجمان)
                 </strong>
                 ؛ حيث تحوّل هذا الوسيط إلى أداة ضغط وإقصاء للمستثمر الوطني عبر مسارين موثقين:
               </p>
@@ -4709,7 +5136,7 @@ export default function App() {
                   </div>
                   <div>
                     <span className="text-[#9c7625] text-xs font-extrabold block">
-                      4. الفخ المستندي (COA) — المطابقة الفنية والمختبرية (ISO 17025)
+                      4. الفخ المستندي (COA) المطابقة الفنية والمختبرية (ISO 17025)
                     </span>
                     <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
                       الفخ المستندي (COA): تناقض شهادة التحليل مع البطاقة التعريفية وإقرار Layer 16%
@@ -4722,12 +5149,7 @@ export default function App() {
               <p className="text-[#3b2954] text-xs sm:text-sm leading-[1.95] mt-5">
                 تكشف السجلات الرسمية عن فخ إجرائي وفني نُصب للمستثمر الوطني عبر تسليمه وثائق متضاربة
                 صادرة عن ذات الجهة (شركة المطاحن العمانية)، مما ترتب عليه إغلاق تسجيل المنتج
-                في النظام الرقمي الإماراتي التابع لوزارة التغير المناخي والبيئة (MOCCAE) تحت الطلب
-                المقيد برقم:{' '}
-                <span className="bg-[#2b124c] border border-[#c9a452] text-[#e7cb82] font-mono text-xs font-bold px-2.5 py-0.5 rounded tabular-nums">
-                  (APH-12052026-3382929)
-                </span>
-                .
+                في النظام الرقمي الإماراتي التابع لوزارة التغير المناخي والبيئة (MOCCAE).
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
@@ -4781,10 +5203,10 @@ export default function App() {
                   </div>
                   <div>
                     <span className="text-[#9c7625] text-xs font-extrabold block">
-                      5. التأصيل القانوني — التكييف التشريعي والرقابي الحصري
+                      5. التأصيل القانوني التكييف التشريعي والرقابي الحصري
                     </span>
                     <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                      التأصيل القانوني: المرسوم السلطاني 67/2014 والمرسوم السلطاني 29/2013
+                      التأصيل القانوني: المرسوم السلطاني 67 لسنة 2014 والمرسوم السلطاني 29 لسنة 2013
                     </h3>
                   </div>
                 </div>
@@ -4794,7 +5216,7 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
                 <div className="royal-node-card rounded-2xl p-5 text-white">
                   <span className="text-[#e7cb82] text-xs font-extrabold block">
-                    المرسوم السلطاني رقم 67/2014
+                    المرسوم السلطاني رقم 67 لسنة 2014
                   </span>
                   <h4 className="text-white font-black text-sm sm:text-base mt-1">
                     قانون حماية المنافسة ومنع الاحتكار (المادتان 9 و10)
@@ -4811,7 +5233,7 @@ export default function App() {
 
                 <div className="bg-[#f3ede0] border-2 border-[#c9a452] rounded-2xl p-5">
                   <span className="text-[#9c7625] text-xs font-extrabold block">
-                    المرسوم السلطاني رقم 29/2013
+                    المرسوم السلطاني رقم 29 لسنة 2013
                   </span>
                   <h4 className="text-[#2b124c] font-black text-sm sm:text-base mt-1">
                     قانون المعاملات المدنية (المادة 381 والمادتان 155 و156)
@@ -5103,76 +5525,81 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2 no-print">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    accept=".pdf,.mp4,.webm,.mov,.jpg,.jpeg,.png,.webp,.pptx,.ppt,.doc,.docx,application/pdf,video/*,image/*"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="gold-metallic-card hover:brightness-105 font-black text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer shadow-sm"
-                  >
-                    <Upload className="w-4 h-4 text-[#2b124c]" />
-                    <span>رفع أدلة ومرفقات (PDF / فيديو / صور / عروض)</span>
-                  </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept=".pdf,.mp4,.webm,.mov,.jpg,.jpeg,.png,.webp,.pptx,.ppt,.doc,.docx,application/pdf,video/*,image/*"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
 
-                  <button
-                    type="button"
-                    onClick={() => setShowUploadPanel((prev) => !prev)}
-                    className="royal-purple-box hover:brightness-110 text-[#e7cb82] font-extrabold text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer"
-                  >
-                    <PlusCircle className="w-3.5 h-3.5 text-[#e7cb82]" />
-                    <span>
-                      {showUploadPanel ? 'إغلاق خيارات التصنيف' : 'تخصيص بيانات المرفق'}
-                    </span>
-                  </button>
-                </div>
+                {showStudioControls && (
+                  <div className="flex items-center gap-2 no-print">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="gold-metallic-card hover:brightness-105 font-black text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer shadow-sm"
+                    >
+                      <Upload className="w-4 h-4 text-[#2b124c]" />
+                      <span>رفع أدلة ومرفقات (PDF / فيديو / صور / عروض)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowUploadPanel((prev) => !prev)}
+                      className="royal-purple-box hover:brightness-110 text-[#e7cb82] font-extrabold text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer"
+                    >
+                      <PlusCircle className="w-3.5 h-3.5 text-[#e7cb82]" />
+                      <span>
+                        {showUploadPanel ? 'إغلاق خيارات التصنيف' : 'تخصيص بيانات المرفق'}
+                      </span>
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* Direct Drag & Drop Multi-Format Bar */}
-              <div
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setIsDraggingOver(true);
-                }}
-                onDragLeave={() => setIsDraggingOver(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setIsDraggingOver(false);
-                  processUploadedFiles(e.dataTransfer.files);
-                }}
-                onClick={() => fileInputRef.current?.click()}
-                className={`mt-5 border-2 border-dashed rounded-2xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4 cursor-pointer transition-all no-print ${
-                  isDraggingOver
-                    ? 'border-[#2b124c] bg-[#e7cb82]/30'
-                    : 'border-[#c9a452] bg-[#f3ede0]/80 hover:bg-[#f3ede0]'
-                }`}
-              >
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] flex items-center justify-center shrink-0">
-                    <Upload className="w-5 h-5" />
+              {/* Direct Drag & Drop Multi-Format Bar (Visible Only in Internal Editing Mode) */}
+              {showStudioControls && (
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDraggingOver(true);
+                  }}
+                  onDragLeave={() => setIsDraggingOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDraggingOver(false);
+                    processUploadedFiles(e.dataTransfer.files);
+                  }}
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`mt-5 border-2 border-dashed rounded-2xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4 cursor-pointer transition-all no-print ${
+                    isDraggingOver
+                      ? 'border-[#2b124c] bg-[#e7cb82]/30'
+                      : 'border-[#c9a452] bg-[#f3ede0]/80 hover:bg-[#f3ede0]'
+                  }`}
+                >
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-11 h-11 rounded-xl royal-purple-box text-[#e7cb82] flex items-center justify-center shrink-0">
+                      <Upload className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-black text-[#2b124c]">
+                        أداة رفع الأدلة والمرفقات المباشرة: اسحب ملفات PDF أو فيديوهات MP4 أو الصور أو العروض التقديمية هنا
+                      </h4>
+                      <p className="text-[11px] text-[#4a3963] mt-0.5">
+                        يتم قبول واستعراض جميع الصيغ مباشرة كأدلة رسمية في العرض مع الحفظ التلقائي الدائم
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h4 className="text-xs sm:text-sm font-black text-[#2b124c]">
-                      أداة رفع الأدلة والمرفقات المباشرة: اسحب ملفات PDF أو فيديوهات MP4 أو الصور أو العروض التقديمية هنا
-                    </h4>
-                    <p className="text-[11px] text-[#4a3963] mt-0.5">
-                      يتم قبول واستعراض جميع الصيغ مباشرة كأدلة رسمية في العرض دون أي قيود أو اشتراط تحويلها إلى تسجيل صوتي
-                    </p>
-                  </div>
+                  <span className="gold-metallic-card text-[11px] font-black px-3.5 py-2 rounded-xl shrink-0">
+                    اختيار ملفات (PDF / MP4 / صور / عروض)
+                  </span>
                 </div>
-                <span className="gold-metallic-card text-[11px] font-black px-3.5 py-2 rounded-xl shrink-0">
-                  اختيار ملفات (PDF / MP4 / صور / عروض)
-                </span>
-              </div>
+              )}
 
               {/* Optional Expandable Custom Metadata Panel */}
-              {showUploadPanel && (
+              {showStudioControls && showUploadPanel && (
                 <div className="mt-4 p-5 rounded-2xl bg-[#f3ede0] border-2 border-[#c9a452] space-y-4 no-print">
                   <div className="flex items-center justify-between">
                     <h4 className="text-sm font-black text-[#2b124c]">
@@ -5234,7 +5661,6 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 mt-6">
                 {documents.map((doc, docIdx) => {
                   const isDocAudioPlaying = activeAudioId === doc.id;
-                  const isUploaded = Boolean(doc.fileUrl);
                   const hasStudioAudio =
                     typeof doc.startTime === 'number' &&
                     typeof doc.endTime === 'number';
@@ -5378,12 +5804,12 @@ export default function App() {
                       </div>
 
                       <div className="p-3.5 pt-2 space-y-2 no-print">
-                        {/* Primary Row: Open Official Document / Media */}
+                        {/* Primary Row: Open/Zoom, 1-Click PDF Download, Replace/Add Media, and Delete */}
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <button
                             type="button"
                             onClick={() => {
-                              if (hasUploadedMedia) {
+                              if (hasUploadedMedia && doc.mediaType !== 'pdf') {
                                 setIsOpeningAutoMuted(false);
                                 setIsModalFullscreen(true);
                                 setModalFitMode('contain');
@@ -5407,32 +5833,65 @@ export default function App() {
                           >
                             <Eye className="w-3.5 h-3.5" />
                             <span>
-                              {hasUploadedMedia
-                                ? 'تكبير ملء الشاشة'
+                              {doc.mediaType === 'pdf'
+                                ? 'فتح واستعراض العرض (PDF)'
+                                : hasUploadedMedia
+                                ? 'تكبير كامل'
                                 : `فتح واستعراض الوثيقة (${doc.pages?.length || 1} شرائح)`}
                             </span>
                           </button>
+
+                          {doc.fileUrl && (
+                            <a
+                              href={doc.fileUrl}
+                              download={
+                                doc.mediaType === 'pdf'
+                                  ? `${doc.title.replace(/[^\w\u0600-\u06FF\s-]/g, '').trim() || 'presentation'}.pdf`
+                                  : doc.title
+                              }
+                              title="تحميل وتنزيل الملف الأصلي مباشرة بضغطة واحدة"
+                              className="px-3 py-2 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] text-[#fff2c6] border-2 border-[#e7cb82] text-[11px] font-black flex items-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
+                            >
+                              <Download className="w-3.5 h-3.5 text-[#e7cb82]" />
+                              <span>
+                                {doc.mediaType === 'pdf' ? 'تحميل العرض (PDF)' : 'تحميل المرفق'}
+                              </span>
+                            </a>
+                          )}
 
                           {showStudioControls && (
                             <>
                               <button
                                 type="button"
-                                onClick={() => handleInstantCycleDocument(doc.id, false)}
-                                title="تبديل الفيديو فوراً للمشهد التالي بضغطة واحدة"
-                                className="px-2.5 py-2 rounded-xl bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                                onClick={() => {
+                                  setReplacingDocId(doc.id);
+                                  replaceDocInputRef.current?.click();
+                                }}
+                                title="تغيير الفيديو / الصورة أو ملف الـ PDF مباشرة من جهازك"
+                                className="px-2.5 py-2 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452] text-[10px] font-black flex items-center gap-1 cursor-pointer shrink-0"
                               >
-                                <RefreshCw className="w-3 h-3 text-[#e7cb82]" />
-                                <span>تبديل فوري</span>
+                                <Upload className="w-3 h-3" />
+                                <span>تغيير الفيديو / الصورة</span>
                               </button>
 
                               <button
                                 type="button"
-                                onClick={() => handleInstantCycleDocument(doc.id, true)}
-                                title="تغيير الفيديو أو استبداله من الاستوديو أو الجهاز"
-                                className="px-2.5 py-2 rounded-xl bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452] text-[10px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                                onClick={() => fileInputRef.current?.click()}
+                                title="إضافة فيديو / صورة أو عرض PDF جديد"
+                                className="px-2.5 py-2 rounded-xl bg-[#381960] hover:bg-[#49217a] border border-[#c9a452] text-[#f3dfa6] text-[10px] font-black flex items-center gap-1 cursor-pointer shrink-0"
                               >
-                                <Upload className="w-3 h-3" />
-                                <span>تغيير الفيديو</span>
+                                <PlusCircle className="w-3 h-3 text-[#e7cb82]" />
+                                <span>إضافة فيديو / صورة</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveUploadedDoc(doc.id, doc.title)}
+                                title="حذف هذا المرفق نهائياً مع الحفظ التلقائي"
+                                className="px-2 py-2 rounded-xl bg-red-950/90 hover:bg-red-900 text-red-100 border border-red-400/60 text-[10px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                              >
+                                <Trash2 className="w-3 h-3 text-red-200" />
+                                <span>حذف</span>
                               </button>
                             </>
                           )}
@@ -5465,13 +5924,13 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* Screen Size, Width, Height, Zoom +/-, Fit/Contain & Vertical Position Controls (Hidden when showStudioControls is false) */}
+                        {/* Screen Size, Width, Height, Zoom +/-, Fit/Contain & Vertical Position Controls */}
                         {showStudioControls && (
                           <div className="pt-1.5 border-t border-[#c9a452]/30 flex flex-wrap items-center justify-between gap-1">
                             <button
                               type="button"
                               onClick={() => updateDocumentSizing(doc.id, { deltaScale: 15 })}
-                              title="تكبير حجم الفيديو داخل الإطار (+)"
+                              title="تكبير حجم العرض داخل الإطار (+)"
                               className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
                             >
                               <ZoomIn className="w-3 h-3 text-[#e7cb82]" />
@@ -5481,7 +5940,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => updateDocumentSizing(doc.id, { deltaScale: -15 })}
-                              title="تصغير حجم الفيديو داخل الإطار (-)"
+                              title="تصغير حجم العرض داخل الإطار (-)"
                               className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
                             >
                               <ZoomOut className="w-3 h-3 text-[#e7cb82]" />
@@ -5500,7 +5959,7 @@ export default function App() {
                                       : 'normal',
                                 })
                               }
-                              title="تغيير عرض الشاشة للبطاقة (عادي / عريض / كامل العرض)"
+                              title="تغيير عرض البطاقة (عادي / عريض / كامل العرض)"
                               className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#e7cb82] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
                             >
                               العرض: {docWidth === 'normal' ? 'عادي' : docWidth === 'wide' ? 'عريض' : 'كامل الشاشة'}
@@ -5520,7 +5979,7 @@ export default function App() {
                                       : 'sm',
                                 })
                               }
-                              title="تغيير ارتفاع شاشة الفيديو"
+                              title="تغيير ارتفاع البطاقة"
                               className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
                             >
                               الارتفاع: {docHeight === 'sm' ? 'صغير' : docHeight === 'md' ? 'وسط' : docHeight === 'lg' ? 'كبير' : 'عملاق'}
@@ -5553,17 +6012,6 @@ export default function App() {
                               <ArrowDown className="w-3 h-3 text-[#e7cb82]" />
                               <span>تحت</span>
                             </button>
-
-                            {documents.length > 1 && isUploaded && (
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveUploadedDoc(doc.id, doc.title)}
-                                title="حذف البطاقة"
-                                className="px-1.5 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            )}
                           </div>
                         )}
                       </div>
@@ -5763,10 +6211,10 @@ export default function App() {
                     القسم السفلي المخصص لتوثيق المحادثات | شركة بن كليلة العامري للتجارة والاستثمار
                   </span>
                   <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
-                    دلائل محادثات الواتساب الموثقة بالصوت والصورة (من الدليل 1 إلى الدليل 7 — أسفل الصفحة)
+                    دلائل محادثات الواتساب الموثقة بالصوت والصورة (من الدليل 1 إلى الدليل {fieldVideos.length} أسفل الصفحة)
                   </h3>
                   <p className="text-[#4a3963] text-xs mt-1">
-                    جميع فيديوهات دلائل المحادثات معروضة في القسم السفلي بالترتيب وتعمل بالصوت الواضح مع إمكانية تكبير الشاشة الكاملة
+                    جميع فيديوهات دلائل المحادثات معروضة في القسم السفلي بالترتيب وتعمل بالصوت الواضح مع زري تغيير الفيديو وإضافة فيديو جديد لكل بطاقة
                   </p>
                 </div>
 
@@ -5788,8 +6236,19 @@ export default function App() {
                     className="gold-metallic-card px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
                   >
                     <Volume2 className="w-4 h-4 text-[#2b124c]" />
-                    <span>تشغيل دلائل المحادثات بالترتيب (1 ← 7)</span>
+                    <span>تشغيل دلائل المحادثات بالترتيب (1 ← {fieldVideos.length})</span>
                   </button>
+
+                  {showStudioControls && (
+                    <button
+                      type="button"
+                      onClick={() => addStudioVideoInputRef.current?.click()}
+                      className="bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452] px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
+                    >
+                      <PlusCircle className="w-4 h-4 text-[#e7cb82]" />
+                      <span>إضافة فيديو</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -5916,50 +6375,257 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="p-4 pt-0">
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const el = evidenceVideoRefs.current[vid.id];
-                              if (el) {
-                                if (el.paused) {
-                                  stopAllAudio();
-                                  pauseAllEvidenceVideos(vid.id);
-                                  el.muted = false;
-                                  el.play().catch(() => {});
-                                } else {
-                                  el.pause();
-                                }
+                      <div className="p-4 pt-0 space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const el = evidenceVideoRefs.current[vid.id];
+                            if (el) {
+                              if (el.paused) {
+                                stopAllAudio();
+                                pauseAllEvidenceVideos(vid.id);
+                                el.muted = false;
+                                el.play().catch(() => {});
+                              } else {
+                                el.pause();
                               }
-                            }}
-                            className="flex-1 bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452] text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
-                          >
-                            <Volume2 className="w-3.5 h-3.5" />
-                            <span>تشغيل / إيقاف بالصوت الواضح</span>
-                          </button>
+                            }
+                          }}
+                          className="w-full bg-[#2b124c] hover:bg-[#3d1b6a] text-[#e7cb82] border border-[#c9a452] text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                        >
+                          <Volume2 className="w-3.5 h-3.5" />
+                          <span>تشغيل بالصوت الواضح</span>
+                        </button>
 
-                          <button
-                            type="button"
-                            onClick={() => {
-                              replacingVideoIdRef.current = vid.id;
-                              setReplacingVideoId(vid.id);
-                              setStudioPickerTarget({
-                                type: 'field-video',
-                                id: vid.id,
-                                title: `تغيير الفيديو / الصورة — ${vid.badge || `دلائل المحادثات (${idx + 1})`}`,
-                              });
-                            }}
-                            className="flex-1 gold-metallic-card text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
-                          >
-                            <Upload className="w-3.5 h-3.5" />
-                            <span>تغيير الفيديو / الصورة</span>
-                          </button>
-                        </div>
+                        {showStudioControls && (
+                          <>
+                            <div className="grid grid-cols-3 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  replacingVideoIdRef.current = vid.id;
+                                  setReplacingVideoId(vid.id);
+                                  setStudioPickerTarget({
+                                    type: 'field-video',
+                                    id: vid.id,
+                                    title: `تغيير الفيديو (${vid.badge || `دلائل المحادثات ${idx + 1}`})`,
+                                  });
+                                }}
+                                className="gold-metallic-card text-[11px] font-black py-2.5 rounded-xl flex items-center justify-center gap-1 cursor-pointer shadow-sm"
+                              >
+                                <Upload className="w-3.5 h-3.5" />
+                                <span>تغيير الفيديو / الصورة</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => addStudioVideoInputRef.current?.click()}
+                                className="bg-[#381960] hover:bg-[#49217a] text-[#f3dfa6] border border-[#c9a452] text-[11px] font-black py-2.5 rounded-xl flex items-center justify-center gap-1 cursor-pointer shadow-sm"
+                              >
+                                <PlusCircle className="w-3.5 h-3.5 text-[#e7cb82]" />
+                                <span>إضافة فيديو / صورة</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteFieldVideo(vid.id, vid.title)}
+                                title="حذف هذا الفيديو وحفظ التعديل تلقائياً"
+                                className="bg-red-950/90 hover:bg-red-900 text-red-100 border border-red-400/60 text-xs font-black py-2.5 rounded-xl flex items-center justify-center gap-1 cursor-pointer shadow-sm"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-red-200" />
+                                <span>حذف</span>
+                              </button>
+                            </div>
+
+                            <div className="pt-1.5 border-t border-[#c9a452]/30 flex flex-wrap items-center justify-between gap-1">
+                              <button
+                                type="button"
+                                onClick={() => updateFieldVideoSizing(vid.id, { deltaScale: 10 })}
+                                className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
+                              >
+                                تكبير +
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => updateFieldVideoSizing(vid.id, { deltaScale: -10 })}
+                                className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
+                              >
+                                تصغير -
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => updateFieldVideoSizing(vid.id, { toggleFit: true })}
+                                className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#e7cb82] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
+                              >
+                                احتواء/ملء
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => updateFieldVideoSizing(vid.id, { deltaY: -10 })}
+                                className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
+                              >
+                                فوق
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => updateFieldVideoSizing(vid.id, { deltaY: 10 })}
+                                className="px-2 py-1 rounded-lg bg-[#2b124c] text-[#f3dfa6] border border-[#c9a452]/60 text-[10px] font-bold cursor-pointer"
+                              >
+                                تحت
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
                 })}
+              </div>
+            </section>
+
+            {/* OMAN VISION 2040 ECONOMIC DIVERSIFICATION & REGULATORY LANDSCAPE (GOOGLE SEARCH GROUNDING) */}
+            <section
+              id="section-regulatory-headlines"
+              className="bg-[#faf7f0] rounded-3xl shadow-md border-2 border-[#c9a452] p-6 sm:p-8 no-print"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-[#dccaa3]">
+                <div>
+                  <span className="text-[#9c7625] text-xs font-extrabold block">
+                    المشهد التنظيمي والسياسات الاقتصادية المحدثة · بحث Google الموثق
+                  </span>
+                  <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
+                    مستجدات سياسات التنويع الاقتصادي وحماية المنافسة وتنمية الصادرات غير النفطية (رؤية عُمان 2040)
+                  </h3>
+                  <p className="text-[#4a3963] text-xs mt-1">
+                    تقارير ومؤشرات تنظيمية مستخلصة من المصادر الرسمية لوزارة التجارة والصناعة وترويج الاستثمار ومركز حماية المنافسة ومنع الاحتكار
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={fetchGroundedRegulatoryHeadlines}
+                  disabled={isLoadingHeadlines}
+                  className="gold-metallic-card px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingHeadlines ? 'animate-spin' : ''}`} />
+                  <span>{isLoadingHeadlines ? 'جاري التحديث...' : 'تحديث المستجدات التنظيمية'}</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mt-6">
+                {regulatoryHeadlines.map((item, idx) => (
+                  <article
+                    key={`${item.title}-${idx}`}
+                    className="rounded-2xl border-2 border-[#c9a452] bg-[#1f0b38]/90 text-white p-5 flex flex-col justify-between shadow-md"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-2 mb-3">
+                        <span className="gold-metallic-card text-[10px] font-black px-2.5 py-0.5 rounded-md">
+                          {item.tag}
+                        </span>
+                        <span className="text-[10px] font-bold text-[#e7cb82]">{item.date}</span>
+                      </div>
+                      <h4 className="text-sm font-black text-[#fff2c6] leading-snug">
+                        {item.title}
+                      </h4>
+                      <p className="text-xs text-[#e8dff5] mt-2 leading-relaxed">
+                        {item.summary}
+                      </p>
+                    </div>
+                    <div className="mt-4 pt-3 border-t border-[#c9a452]/30 flex items-center justify-between text-[11px]">
+                      <span className="text-[#e7cb82] font-bold truncate">{item.source}</span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            {/* SEQUENTIAL AUDIO FINGERPRINT DEDUPLICATION & AUTO-SAVE CHANGE LOG */}
+            <section
+              id="section-audio-dedup-log"
+              className="bg-[#faf7f0] rounded-3xl shadow-md border-2 border-[#c9a452] p-6 sm:p-8 no-print"
+            >
+              <div className="pb-4 border-b border-[#dccaa3]">
+                <span className="text-[#9c7625] text-xs font-extrabold block">
+                  توثيق هندسة الصوت والوسائط · البصمة الصوتية وسجل التعديلات
+                </span>
+                <h3 className="text-[#2b124c] text-lg sm:text-xl font-black mt-0.5">
+                  الترتيب التسلسلي للتسجيلات الصوتية الفريدة (من المقدمة إلى الخاتمة) وسجل التعديلات المحفوظة تلقائياً
+                </h3>
+                <p className="text-[#4a3963] text-xs mt-1">
+                  قائمة التسجيلات الفريدة المعتمدة مرة واحدة فقط وفق البصمة الصوتية (MD5) بعد حذف النسخ المكررة واقتطاع الكلمات المستبعدة
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+                {AUDIO_DEDUPLICATION_CHANGELOG.map((entry) => {
+                  const isPlayingEntry =
+                    (entry.id === 'clarification-questions' && isClarificationPlaying) ||
+                    (entry.id === 'executive-appeal' && isExecAppealPlaying) ||
+                    (entry.id === 'main-dossier' && isFullPresentationPlaying) ||
+                    (isStudioTrackPlaying && activeAudioId === entry.id);
+                  return (
+                    <div
+                      key={entry.id}
+                      className="rounded-2xl border border-[#c9a452] bg-[#f3ede0] p-4 flex flex-col justify-between"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="bg-[#2b124c] text-[#e7cb82] text-[10px] font-black px-2.5 py-0.5 rounded-md">
+                            الترتيب #{entry.order} · {entry.durationLabel}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => playApprovedRecordingItem(entry.id, true, false)}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black flex items-center gap-1 cursor-pointer ${
+                              isPlayingEntry
+                                ? 'gold-metallic-card'
+                                : 'bg-[#2b124c] text-[#e7cb82] border border-[#c9a452]'
+                            }`}
+                          >
+                            {isPlayingEntry ? (
+                              <Pause className="w-3 h-3 fill-current" />
+                            ) : (
+                              <Play className="w-3 h-3 fill-current" />
+                            )}
+                            <span>{isPlayingEntry ? 'قيد التشغيل' : 'تشغيل التسجيل'}</span>
+                          </button>
+                        </div>
+                        <h4 className="text-xs sm:text-sm font-black text-[#2b124c] mt-2">
+                          {entry.sectionTitle}
+                        </h4>
+                        <p className="text-[11px] text-[#3b2954] mt-1 leading-relaxed">
+                          {entry.processingNotes}
+                        </p>
+                      </div>
+                      {entry.removedDuplicates.length > 0 && (
+                        <div className="mt-2.5 pt-2 border-t border-[#dccaa3] text-[10px] text-[#7c5b14] font-bold">
+                          الملفات المكررة المستبعدة: {entry.removedDuplicates.join(' ، ')}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-5 rounded-2xl bg-[#1f0b38] border border-[#c9a452] p-4 text-white">
+                <h4 className="text-xs font-black text-[#e7cb82] mb-2">
+                  سجل التعديلات والحفظ التلقائي للوسائط والنصوص:
+                </h4>
+                <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                  {modificationLogs.map((log) => (
+                    <div
+                      key={log.id}
+                      className="text-[11px] flex flex-wrap items-center justify-between gap-2 bg-white/5 px-3 py-1.5 rounded-lg border border-[#c9a452]/30"
+                    >
+                      <div>
+                        <strong className="text-[#f3dfa6]">{log.action}: </strong>
+                        <span className="text-[#e8dff5]">{log.detail}</span>
+                      </div>
+                      <span className="text-[10px] text-[#e7cb82] font-mono">{log.time}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </section>
           </main>
@@ -5975,10 +6641,10 @@ export default function App() {
                 />
               </div>
               <p className="text-[#f3dfa6] font-black text-sm">
-                شركة بن كليلة العامري للتجارة والاستثمار — ملف المتابعة الرقابية المعتمد 2026م
+                شركة بن كليلة العامري للتجارة والاستثمار · ملف المتابعة الرقابية المعتمد 2026م
               </p>
               <p className="text-white text-xs font-bold">
-                ملف المراجع: الفاضل خالد المسروري | تحديات التنويع الاقتصادي: عوائق أمام الصادرات غير
+                ملف المراجع أستاذ خالد المسروري مدير دائرة الاحتكار | تحديات التنويع الاقتصادي: عوائق أمام الصادرات غير
                 النفطية في مسار رؤية عُمان 2040
               </p>
               <p className="text-[#e8dff5]/80 text-[11px] leading-relaxed">
@@ -5986,9 +6652,340 @@ export default function App() {
                 وزارة التجارة والصناعة وترويج الاستثمار، ومركز حماية المنافسة ومنع الاحتكار، ونظام
                 وزارة التغير المناخي والبيئة بدولة الإمارات.
               </p>
+              <div className="pt-3 flex items-center justify-center gap-3 no-print">
+                <button
+                  type="button"
+                  onClick={() => setShowInternalAdminPanel(true)}
+                  className="px-3.5 py-1.5 rounded-xl bg-[#140526]/80 hover:bg-[#240b3b] border border-[#c9a452]/50 text-[#e7cb82] text-[11px] font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>لوحة التحكم الداخلية وتجهيز النشر (خاصة بالمالك)</span>
+                </button>
+              </div>
             </div>
           </footer>
         </>
+      )}
+
+      {/* INTERNAL PRE-PUBLISH CONTROL PANEL MODAL (ACCESSIBLE ONLY TO OWNER BEFORE PUBLISHING) */}
+      {showInternalAdminPanel && (
+        <div
+          className="fixed inset-0 z-50 bg-[#120422]/85 backdrop-blur-sm flex items-center justify-center p-4 no-print"
+          onClick={() => setShowInternalAdminPanel(false)}
+        >
+          <div
+            className="bg-[#faf7f0] text-[#23113d] rounded-3xl max-w-4xl w-full max-h-[90vh] flex flex-col border-2 border-[#c9a452] shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="royal-purple-box text-white px-6 py-4 flex items-center justify-between gap-4 border-b border-[#c9a452]">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl gold-metallic-card flex items-center justify-center shrink-0">
+                  <Sliders className="w-5 h-5 text-[#2b124c]" />
+                </div>
+                <div>
+                  <span className="text-[#e7cb82] text-[11px] font-extrabold block">
+                    بيئة التحرير الداخلية وتجهيز النشر · الحفظ التلقائي الدائم مفعّل 100%
+                  </span>
+                  <h3 className="font-black text-base sm:text-lg">
+                    لوحة التحكم الداخلية (إدارة العرض العام، أزرار التحرير، وتناوب فيديوهات المخازن والشاحنات)
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowInternalAdminPanel(false)}
+                className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto flex-1 space-y-6">
+              {/* 1. Public Clean Mode vs Internal Editor Mode Toggle */}
+              <div className="rounded-2xl border-2 border-[#c9a452] bg-[#f3ede0] p-5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm sm:text-base font-black text-[#2b124c]">
+                      1. وضع العرض العام للنشر مقابل بيئة التحرير الداخلية
+                    </h4>
+                    <p className="text-xs text-[#4a3963] mt-0.5">
+                      في وضع النشر العام يتم إخفاء جميع أزرار التكبير والقص والتحريك والرفع والحذف عن المشاهد بحيث تظل الصور والفيديوهات ثابتة كما وضعتها بالضبط.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowStudioControls((prev) => {
+                        const next = !prev;
+                        setModificationLogs((logs) => [
+                          {
+                            id: `mode-${Date.now()}`,
+                            action: next
+                              ? 'تفعيل بيئة التحرير الداخلية'
+                              : 'تفعيل وضع النشر العام النظيف',
+                            detail: next
+                              ? 'تم إظهار أدوات تعديل الأحجام والرفع والاستبدال والحذف للمالك.'
+                              : 'تم إخفاء كافة أشرطة التحكم المرئية عن المشاهد العام وتثبيت الوسائط.',
+                            time: new Date().toLocaleTimeString('ar-OM', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            }),
+                          },
+                          ...logs,
+                        ]);
+                        return next;
+                      });
+                    }}
+                    className={`px-4 py-2.5 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-md ${
+                      showStudioControls
+                        ? 'bg-[#2b124c] text-[#e7cb82] border border-[#c9a452]'
+                        : 'gold-metallic-card'
+                    }`}
+                  >
+                    <Sliders className="w-4 h-4" />
+                    <span>
+                      {showStudioControls
+                        ? 'إخفاء أدوات التحرير الآن (تفعيل وضع النشر النظيف)'
+                        : 'تفعيل أدوات التحرير الداخلية (تعديل الصور والفيديوهات)'}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  <div
+                    onClick={() => setShowStudioControls(false)}
+                    className={`p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
+                      !showStudioControls
+                        ? 'border-emerald-700 bg-emerald-950/10'
+                        : 'border-[#c9a452]/50 bg-white/70'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-[#2b124c]">
+                        وضع المشاهد العام النظيف (معتمد للنشر)
+                      </span>
+                      {!showStudioControls && (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+                      )}
+                    </div>
+                    <p className="text-[11px] text-[#4a3963] mt-1">
+                      جميع أزرار التكبير (+) والتصغير (-) والارتفاع والقص والتحريك والحذف والرفع مخفية تماماً عن المشاهد.
+                    </p>
+                  </div>
+
+                  <div
+                    onClick={() => setShowStudioControls(true)}
+                    className={`p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
+                      showStudioControls
+                        ? 'border-[#2b124c] bg-[#e7cb82]/25'
+                        : 'border-[#c9a452]/50 bg-white/70'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-[#2b124c]">
+                        بيئة التحرير الداخلية (للمالك فقط قبل النشر)
+                      </span>
+                      {showStudioControls && (
+                        <CheckCircle2 className="w-4 h-4 text-[#2b124c]" />
+                      )}
+                    </div>
+                    <p className="text-[11px] text-[#4a3963] mt-1">
+                      تتيح لك رفع أو استبدال أو حذف أو تعديل أبعاد أي صورة أو فيديو مع حفظ تلقائي فوري ودائم.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* 2. Interactive Rotating Warehouse & Truck Background Videos Control */}
+              <div className="rounded-2xl border-2 border-[#c9a452] bg-[#f3ede0] p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm sm:text-base font-black text-[#2b124c]">
+                      2. تناوب فيديوهات المخازن والشاحنات التفاعلية في الخلفية ({allBgVideoUrls.length} فيديو)
+                    </h4>
+                    <p className="text-xs text-[#4a3963] mt-0.5">
+                      جميع فيديوهات المخازن والشاحنات المحملة (بما فيها الفيديوهات الـ 8 الجديدة) تتبادل تلقائياً في الخلفية واحداً تلو الآخر كل بضع ثوانٍ.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAutoCycleBgScenes((prev) => !prev);
+                        setBgVideoUrl('');
+                      }}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-black cursor-pointer border ${
+                        autoCycleBgScenes && !bgVideoUrl
+                          ? 'gold-metallic-card'
+                          : 'bg-[#2b124c] text-[#f3dfa6] border-[#c9a452]'
+                      }`}
+                    >
+                      {autoCycleBgScenes && !bgVideoUrl
+                        ? 'التناوب التلقائي نشط'
+                        : 'تفعيل التناوب التلقائي للخلفية'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => changeBgStudioInputRef.current?.click()}
+                      className="px-3.5 py-2 rounded-xl bg-[#2b124c] text-[#e7cb82] border border-[#c9a452] text-xs font-black flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>+ إضافة فيديو مخزن/شاحنة للخلفية</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-white/80 p-3.5 rounded-xl border border-[#c9a452]">
+                  <span className="text-xs font-extrabold text-[#2b124c]">
+                    سرعة تبادل فيديوهات المخازن والشاحنات في الخلفية:
+                  </span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[3, 4, 6, 8].map((sec) => (
+                      <button
+                        key={sec}
+                        type="button"
+                        onClick={() => {
+                          userModifiedMediaRef.current = true;
+                          setBgCycleIntervalSec(sec);
+                          setBgVideoUrl('');
+                          setAutoCycleBgScenes(true);
+                          setModificationLogs((logs) => [
+                            {
+                              id: `bg-sec-${Date.now()}`,
+                              action: 'تحديث سرعة تناوب فيديو الخلفية',
+                              detail: `تم ضبط تبادل فيديوهات المخازن والشاحنات في الخلفية كل ${sec} ثوانٍ.`,
+                              time: new Date().toLocaleTimeString('ar-OM', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              }),
+                            },
+                            ...logs,
+                          ]);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-black cursor-pointer border ${
+                          bgCycleIntervalSec === sec && !bgVideoUrl
+                            ? 'gold-metallic-card'
+                            : 'bg-[#2b124c] text-[#f3dfa6] border-[#c9a452]'
+                        }`}
+                      >
+                        كل {sec} ثوانٍ
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 max-h-56 overflow-y-auto p-1">
+                  {allBgVideoUrls.map((url, idx) => {
+                    const isCurrentBg =
+                      (bgVideoUrl && bgVideoUrl === url) ||
+                      (!bgVideoUrl && bgSceneIndex % allBgVideoUrls.length === idx);
+                    return (
+                      <button
+                        key={`${url}-${idx}`}
+                        type="button"
+                        onClick={() => {
+                          setBgVideoUrl('');
+                          setAutoCycleBgScenes(true);
+                          setBgSceneIndex(idx);
+                        }}
+                        className={`p-2 rounded-xl border text-right transition-all cursor-pointer flex items-center justify-between gap-1.5 ${
+                          isCurrentBg
+                            ? 'gold-metallic-card ring-2 ring-[#2b124c]'
+                            : 'bg-[#1f0b38] text-[#f3dfa6] border-[#c9a452]/60 hover:bg-[#2b124c]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Film className="w-3.5 h-3.5 shrink-0" />
+                          <span className="text-[11px] font-bold truncate">
+                            مخزن وشاحنة #{idx + 1}
+                          </span>
+                        </div>
+                        {isCurrentBg && (
+                          <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-black/25">
+                            يعمل الآن
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 3. Pre-Publish Inspection Summary across All Sections */}
+              <div className="rounded-2xl border-2 border-[#c9a452] bg-[#1f0b38] text-white p-5 space-y-3">
+                <h4 className="text-sm font-black text-[#e7cb82]">
+                  3. تقرير فحص وجاهزية الأقسام للنشر والحفظ التلقائي:
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                  <div className="bg-white/5 border border-[#c9a452]/40 rounded-xl p-3 flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="text-[#fff2c6] block">
+                        معرض الشاحنات والمخازن (القسم 01) والخلفية المتناوبة
+                      </strong>
+                      <span className="text-[#e8dff5]/85 text-[11px]">
+                        تم دمج الفيديوهات الـ 8 الجديدة وتدوير {allBgVideoUrls.length} مشهداً للمخازن والشاحنات كل {bgCycleIntervalSec} ثوانٍ تلقائياً.
+                      </span>
+                    </div>
+                  </div>
+                  <div className="bg-white/5 border border-[#c9a452]/40 rounded-xl p-3 flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="text-[#fff2c6] block">
+                        قوائم التشغيل والتسجيلات الصوتية ({audioRecordings.length} تسجيلات)
+                      </strong>
+                      <span className="text-[#e8dff5]/85 text-[11px]">
+                        مرتبة زمنياً من المقدمة إلى الخاتمة دون تكرار مع إخفاء أزرار الرفع والتبديل عن المشاهد العام.
+                      </span>
+                    </div>
+                  </div>
+                  <div className="bg-white/5 border border-[#c9a452]/40 rounded-xl p-3 flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="text-[#fff2c6] block">
+                        مكتبة الأدلة الرسمية والـ PDF ({documents.length} مرفقات)
+                      </strong>
+                      <span className="text-[#e8dff5]/85 text-[11px]">
+                        تعمل بكامل الشرائح والمعاينات مع إخفاء أشرطة التكبير والقص والحذف في وضع المشاهد العام.
+                      </span>
+                    </div>
+                  </div>
+                  <div className="bg-white/5 border border-[#c9a452]/40 rounded-xl p-3 flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="text-[#fff2c6] block">
+                        فيديوهات دلائل المحادثات السفلية ({fieldVideos.length} دلائل)
+                      </strong>
+                      <span className="text-[#e8dff5]/85 text-[11px]">
+                        تعمل بالصوت الواضح والتكبير الكامل مع حفظ تلقائي فوري لأي تعديل أو حذف في الخادم والمتصفح.
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-[#f3ede0] border-t border-[#c9a452] px-6 py-3.5 flex items-center justify-between gap-3">
+              <span className="text-xs font-extrabold text-[#2b124c]">
+                حالة العرض الحالية:{' '}
+                <strong className="text-[#8c671d]">
+                  {showStudioControls
+                    ? 'بيئة التحرير الداخلية (أدوات التعديل ظاهرة للمالك)'
+                    : 'وضع العرض العام النظيف (جاهز للنشر بدون أزرار تحكم)'}
+                </strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowInternalAdminPanel(false)}
+                className="gold-metallic-card px-5 py-2 rounded-xl text-xs font-black cursor-pointer"
+              >
+                حفظ وإغلاق اللوحة
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 8. INTERACTIVE MULTI-FORMAT DOCUMENT / VIDEO / IMAGE / SLIDE VIEWER MODAL */}
